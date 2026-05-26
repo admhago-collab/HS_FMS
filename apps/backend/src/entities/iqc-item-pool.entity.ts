@@ -1,0 +1,72 @@
+/**
+ * @file iqc-item-pool.entity.ts
+ * @description IQC 검사항목 풀(Pool) 엔티티 - 전역 검사항목 정의 마스터
+ *              COMPANY + PLANT_CD + INSP_ITEM_CODE 복합키 사용.
+ *
+ * 초보자 가이드:
+ * 1. COMPANY + PLANT_CD + INSP_ITEM_CODE가 자연키 PK (IQC-001 등) - 품목코드(itemCode)와 구분
+ * 2. INSP_ITEM_NAME: 검사항목명
+ * 3. JUDGE_METHOD: VISUAL(육안) / MEASURE(계측)
+ * 4. 계측 항목은 LSL/USL/UNIT으로 규격 범위 정의
+ */
+import {
+  Entity,
+  PrimaryColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+} from 'typeorm';
+
+@Entity({ name: 'IQC_ITEM_POOL' })
+export class IqcItemPool {
+  @PrimaryColumn({ type: 'varchar2', name: 'COMPANY', length: 50 })
+  company: string;
+
+  @PrimaryColumn({ type: 'varchar2', name: 'PLANT_CD', length: 50 })
+  plant: string;
+
+  @PrimaryColumn({ name: 'INSP_ITEM_CODE', length: 20 })
+  inspItemCode: string;
+
+  @Column({ name: 'INSP_ITEM_NAME', length: 100 })
+  inspItemName: string;
+
+  @Column({ name: 'JUDGE_METHOD', length: 20 })
+  judgeMethod: string;
+
+  @Column({ type: 'varchar2', name: 'CRITERIA', length: 255, nullable: true })
+  criteria: string | null;
+
+  @Column({ name: 'LSL', type: 'decimal', precision: 12, scale: 4, nullable: true })
+  lsl: number | null;
+
+  @Column({ name: 'USL', type: 'decimal', precision: 12, scale: 4, nullable: true })
+  usl: number | null;
+
+  @Column({ type: 'varchar2', name: 'UNIT', length: 20, nullable: true })
+  unit: string | null;
+
+  @Column({ name: 'REVISION', type: 'int', default: 1 })
+  revision: number;
+
+  @Column({ name: 'EFFECTIVE_DATE', type: 'timestamp', nullable: true })
+  effectiveDate: Date | null;
+
+  @Column({ name: 'USE_YN', length: 1, default: 'Y' })
+  useYn: string;
+
+  @Column({ type: 'varchar2', name: 'REMARK', length: 500, nullable: true })
+  remark: string | null;
+
+  @Column({ type: 'varchar2', name: 'CREATED_BY', length: 50, nullable: true })
+  createdBy: string | null;
+
+  @Column({ type: 'varchar2', name: 'UPDATED_BY', length: 50, nullable: true })
+  updatedBy: string | null;
+
+  @CreateDateColumn({ name: 'CREATED_AT', type: 'timestamp' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'UPDATED_AT', type: 'timestamp' })
+  updatedAt: Date;
+}

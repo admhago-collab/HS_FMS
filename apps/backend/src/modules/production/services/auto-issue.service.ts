@@ -1,0 +1,384 @@
+/**
+ * @file services/auto-issue.service.ts
+ * @description BOM 기반 자재 자동차감(Auto-Issue) 서비스
+ *
+ * 초보자 가이드:
+ * 1. 생산실적 등록/완료 시 호출되어 BOM 자재를 FIFO로 자동 차감합니다.
+ * 2. SysConfig 설정(MAT_AUTO_ISSUE_TIMING)으로 차감 시점을 제어합니다.
+ * 3. BOM의 qtyPer × (goodQty + defectQty)로 소요량을 계산합니다.
+ * 4. MatLot → MatIssue → StockTransaction → MatStock 순으로 처리합니다.
+ * 5. 외부 트랜잭션(queryRunner)이 전달되면 그것을 공유하고,
+ *    없으면 자체 트랜잭션을 생성합니다.
+ *
+ * 호출 예시:
+ *   await autoIssueService.execute('ON_CREATE', 101, 'JO-20260305-0001', 50);
+ */
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, QueryRunner, In } from 'typeorm';
+
+import { BomMaster } from '../../../entities/bom-master.entity';
+import { MatLot } from '../../../entities/mat-lot.entity';
+import { MatStock } from '../../../entities/mat-stock.entity';
+import { MatIssue } from '../../../entities/mat-issue.entity';
+import { StockTransaction } from '../../../entities/stock-transaction.entity';
+import { JobOrder } from '../../../entities/job-order.entity';
+import { SysConfigService } from '../../system/services/sys-config.service';
+import { NumberingService } from '../../../shared/numbering.service';
+import { TransactionService } from '../../../shared/transaction.service';
+
+/** 자동차감 결과 인터페이스 */
+export interface AutoIssueResult {
+  issued: { matUid: string; itemCode: string; issueQty: number }[];
+  warnings: string[];
+  skipped: boolean;
+}
+
+interface BomComponentRow {
+  parentItemCode: string;
+  childItemCode: string;
+  qtyPer: number;
+  seq: number;
+  bomGrp: string | null;
+  processCode: string | null;
+  side: string | null;
+  ecoNo: string | null;
+  validFrom: Date | string | null;
+  validTo: Date | string | null;
+  useYn: string;
+}
+
+type IssueTiming = 'ON_CREATE' | 'ON_COMPLETE';
+type TenantContext = { company?: string | null; plant?: string | null };
+
+@Injectable()
+export class AutoIssueService {
+  private readonly logger = new Logger(AutoIssueService.name);
+
+  constructor(
+    @InjectRepository(BomMaster)
+    private readonly bomRepo: Repository<BomMaster>,
+    @InjectRepository(MatLot)
+    private readonly matLotRepo: Repository<MatLot>,
+    @InjectRepository(MatStock)
+    private readonly matStockRepo: Repository<MatStock>,
+    @InjectRepository(MatIssue)
+    private readonly matIssueRepo: Repository<MatIssue>,
+    @InjectRepository(StockTransaction)
+    private readonly stockTxRepo: Repository<StockTransaction>,
+    @InjectRepository(JobOrder)
+    private readonly jobOrderRepo: Repository<JobOrder>,
+    private readonly sysConfigService: SysConfigService,
+    private readonly numbering: NumberingService,
+    private readonly tx: TransactionService,
+  ) {}
+
+  private tenantWhere(tenant: TenantContext) {
+    return {
+      ...(tenant.company ? { company: tenant.company } : {}),
+      ...(tenant.plant ? { plant: tenant.plant } : {}),
+    };
+  }
+
+  private assertSameTenant(
+    context: string,
+    tenant: TenantContext,
+    row: { company?: string | null; plant?: string | null },
+  ) {
+    if (tenant.company && row.company !== tenant.company) {
+      throw new BadRequestException(`${context} 회사 정보가 일치하지 않습니다. request=${tenant.company}, row=${row.company ?? 'NULL'}`);
+    }
+    if (tenant.plant && row.plant !== tenant.plant) {
+      throw new BadRequestException(`${context} 사업장 정보가 일치하지 않습니다. request=${tenant.plant}, row=${row.plant ?? 'NULL'}`);
+    }
+  }
+
+  /**
+   * BOM 기반 자재 자동차감 실행
+   * @param timing  호출 시점 ('ON_CREATE' | 'ON_COMPLETE')
+   * @param prodResultNo  생산실적 번호 (PK)
+   * @param orderNo  작업지시 번호
+   * @param qty  실적 수량 (goodQty + defectQty)
+   * @param externalQR  외부 트랜잭션 QueryRunner (선택)
+   */
+  async execute(
+    timing: IssueTiming,
+    prodResultNo: string,
+    orderNo: string,
+    qty: number,
+    externalQR?: QueryRunner,
+  ): Promise<AutoIssueResult> {
+    const result: AutoIssueResult = { issued: [], warnings: [], skipped: false };
+
+    /* ── 1. SysConfig 타이밍 확인 ─────────────────────── */
+    const cfgTiming = await this.sysConfigService.getValue('MAT_AUTO_ISSUE_TIMING');
+    if (!cfgTiming || cfgTiming !== timing) {
+      this.logger.log(`자동차감 skip — 설정: ${cfgTiming}, 호출: ${timing}`);
+      result.skipped = true;
+      return result;
+    }
+
+    if (externalQR) {
+      await this.executeInTransaction(externalQR, result, prodResultNo, orderNo, qty);
+    } else {
+      await this.tx.run((qr) => this.executeInTransaction(qr, result, prodResultNo, orderNo, qty));
+    }
+
+    this.logger.log(
+      `자동차감 완료 — orderNo: ${orderNo}, 품목 ${result.issued.length}건`,
+    );
+    return result;
+  }
+
+  private async executeInTransaction(
+    qr: QueryRunner,
+    result: AutoIssueResult,
+    prodResultNo: string,
+    orderNo: string,
+    qty: number,
+  ): Promise<void> {
+    /* ── 3. 작업지시 → itemCode 조회 ──────────────── */
+    const jobOrder = await qr.manager.findOne(JobOrder, {
+      where: { orderNo },
+    });
+    if (!jobOrder) {
+      throw new BadRequestException(`작업지시를 찾을 수 없습니다: ${orderNo}`);
+    }
+    const tenant: TenantContext = { company: jobOrder.company, plant: jobOrder.plant };
+
+    /* ── 4. BOM 조회 (유효 기간 & useYn) ──────────── */
+    const today = new Date();
+    const bomList = await this.findValidBom(qr, jobOrder.itemCode, today, tenant);
+    if (bomList.length === 0) {
+      this.logger.warn(`BOM 없음 — itemCode: ${jobOrder.itemCode}`);
+      result.skipped = true;
+      return;
+    }
+
+    /* ── 5. 재고 부족 정책 조회 ───────────────────── */
+    const stockCheckPolicy =
+      (await this.sysConfigService.getValue('MAT_ISSUE_STOCK_CHECK')) ?? 'BLOCK';
+
+    /* ── 6. 자식 품목별 FIFO 차감 ─────────────────── */
+    for (const bom of bomList) {
+      const requiredQty = Number(bom.qtyPer) * qty;
+      if (requiredQty <= 0) continue;
+
+      const childResult = await this.issueFifo(
+        qr, bom.childItemCode, requiredQty, orderNo,
+        prodResultNo, stockCheckPolicy, result.warnings, tenant,
+      );
+      result.issued.push(...childResult);
+    }
+  }
+
+  /* ================================================================
+   *  BOM 유효건 조회
+   * ================================================================ */
+  private async findValidBom(
+    qr: QueryRunner,
+    parentItemCode: string,
+    today: Date,
+    tenant: TenantContext,
+  ): Promise<BomComponentRow[]> {
+    const dateStr = today.toISOString().slice(0, 10);
+    const tenantClauses: string[] = [];
+    const params = [parentItemCode, dateStr, dateStr];
+    if (tenant.company) {
+      tenantClauses.push(`          AND b.COMPANY = :${params.length + 1}`);
+      params.push(tenant.company);
+    }
+    if (tenant.plant) {
+      tenantClauses.push(`          AND b.PLANT_CD = :${params.length + 1}`);
+      params.push(tenant.plant);
+    }
+    const tenantSql = tenantClauses.length > 0 ? `${tenantClauses.join('\n')}\n` : '';
+    // Raw SQL로 복합 PK 테이블 조회 (TypeORM QueryBuilder의 Oracle 복합PK 호환 문제 회피)
+    const rows: BomComponentRow[] = await qr.manager.query(
+      `SELECT b.PARENT_ITEM_CODE AS "parentItemCode",
+              b.CHILD_ITEM_CODE  AS "childItemCode",
+              b.REVISION         AS "revision",
+              b.QTY_PER          AS "qtyPer",
+              b.SEQ              AS "seq",
+              b.BOM_GRP          AS "bomGrp",
+              b.OPER             AS "processCode",
+              b.SIDE             AS "side",
+              b.ECO_NO           AS "ecoNo",
+              b.VALID_FROM       AS "validFrom",
+              b.VALID_TO         AS "validTo",
+              b.USE_YN           AS "useYn"
+         FROM BOM_MASTERS b
+        WHERE b.PARENT_ITEM_CODE = :1
+          AND b.USE_YN = 'Y'
+          AND (b.VALID_FROM IS NULL OR b.VALID_FROM <= TO_DATE(:2, 'YYYY-MM-DD'))
+          AND (b.VALID_TO   IS NULL OR b.VALID_TO   >= TO_DATE(:3, 'YYYY-MM-DD'))
+${tenantSql}
+        ORDER BY b.SEQ ASC`,
+      params,
+    );
+    return rows;
+  }
+
+  /* ================================================================
+   *  FIFO LOT 차감 (분할 차감 포함)
+   * ================================================================ */
+  private async issueFifo(
+    qr: QueryRunner,
+    itemCode: string,
+    requiredQty: number,
+    orderNo: string,
+    prodResultNo: string,
+    stockCheckPolicy: string,
+    warnings: string[],
+    tenant: TenantContext,
+  ): Promise<{ matUid: string; itemCode: string; issueQty: number }[]> {
+    const issued: { matUid: string; itemCode: string; issueQty: number }[] = [];
+    const tenantWhere = this.tenantWhere(tenant);
+
+    /* FIFO LOT 목록 (PASS & NORMAL & MatStock.qty > 0) — IN 배치로 N+1 방지 */
+    const lotQb = qr.manager
+      .createQueryBuilder(MatLot, 'l')
+      .where('l.itemCode = :itemCode', { itemCode })
+      .andWhere('l.iqcStatus = :iqc', { iqc: 'PASS' })
+      .andWhere('l.status = :st', { st: 'NORMAL' });
+    if (tenant.company) lotQb.andWhere('l.company = :company', { company: tenant.company });
+    if (tenant.plant) lotQb.andWhere('l.plant = :plant', { plant: tenant.plant });
+    const candidateLots = await lotQb.orderBy('l.createdAt', 'ASC').getMany();
+    for (const lot of candidateLots) {
+      this.assertSameTenant('자동차감 LOT', tenant, lot);
+    }
+
+    const candidateMatUids = candidateLots.map((l) => l.matUid);
+    const allStocks = candidateMatUids.length > 0
+      ? await qr.manager.find(MatStock, { where: { matUid: In(candidateMatUids), ...tenantWhere } })
+      : [];
+    for (const stock of allStocks) {
+      this.assertSameTenant('자동차감 재고', tenant, stock);
+    }
+
+    // matUid별 재고수량 합산 Map
+    const stockQtyByMatUid = new Map<string, number>();
+    for (const s of allStocks) {
+      stockQtyByMatUid.set(s.matUid, (stockQtyByMatUid.get(s.matUid) ?? 0) + s.qty);
+    }
+
+    const lotsWithStock: { lot: MatLot; stockQty: number }[] = [];
+    for (const lot of candidateLots) {
+      const totalStockQty = stockQtyByMatUid.get(lot.matUid) ?? 0;
+      if (totalStockQty > 0) {
+        lotsWithStock.push({ lot, stockQty: totalStockQty });
+      }
+    }
+
+    const totalAvailable = lotsWithStock.reduce((sum, ls) => sum + ls.stockQty, 0);
+
+    /* 재고 부족 체크 */
+    if (totalAvailable < requiredQty) {
+      const msg =
+        `재고 부족 — ${itemCode}: 필요 ${requiredQty}, 가용 ${totalAvailable}`;
+      if (stockCheckPolicy === 'BLOCK') {
+        throw new BadRequestException(msg);
+      }
+      // WARN: 가용분만 차감
+      this.logger.warn(msg);
+      warnings.push(msg);
+    }
+
+    let remaining = Math.min(requiredQty, totalAvailable);
+
+    for (const { lot, stockQty } of lotsWithStock) {
+      if (remaining <= 0) break;
+
+      const issueQty = Math.min(remaining, stockQty);
+      remaining -= issueQty;
+
+      /* (a) MatIssue 생성 */
+      const issueNo = await this.numbering.nextInTx(qr, 'MAT_ISSUE');
+      const issueEntity = qr.manager.create(MatIssue, {
+        issueNo,
+        seq: 1,
+        orderNo,
+        prodResultNo,
+        matUid: lot.matUid,
+        issueQty,
+        issueType: 'PROD_AUTO',
+        status: 'DONE',
+        company: lot.company,
+        plant: lot.plant,
+      });
+      await qr.manager.save(MatIssue, issueEntity);
+
+      /* (b) StockTransaction 생성 */
+      const transNo = await this.numbering.nextInTx(qr, 'STOCK_TX');
+      const txEntity = qr.manager.create(StockTransaction, {
+        transNo,
+        transType: 'MAT_OUT',
+        itemCode,
+        matUid: lot.matUid,
+        qty: -issueQty,
+        refType: 'MAT_ISSUE',
+        refId: `${issueNo}-1`,
+        status: 'DONE',
+        company: lot.company,
+        plant: lot.plant,
+      });
+      await qr.manager.save(StockTransaction, txEntity);
+
+      /* (c) MatStock 차감 (해당 LOT의 모든 창고 재고) */
+      await this.deductMatStock(qr, itemCode, lot.matUid, issueQty, tenant);
+
+      /* (d) MatStock.qty 합산 → 0이면 MatLot DEPLETED 처리 */
+      const remainingStocks = await qr.manager.find(MatStock, {
+        where: { matUid: lot.matUid, ...tenantWhere },
+      });
+      const remainingStockQty = remainingStocks.reduce((s, st) => s + st.qty, 0);
+      if (remainingStockQty <= 0) {
+        await qr.manager.update(MatLot, { matUid: lot.matUid, ...tenantWhere }, { status: 'DEPLETED' });
+      }
+
+      issued.push({ matUid: lot.matUid, itemCode, issueQty });
+    }
+
+    return issued;
+  }
+
+  /* ================================================================
+   *  MatStock 차감 — LOT 기준 모든 창고에서 차감
+   * ================================================================ */
+  private async deductMatStock(
+    qr: QueryRunner,
+    itemCode: string,
+    matUid: string,
+    totalDeduct: number,
+    tenant: TenantContext,
+  ): Promise<void> {
+    const tenantWhere = this.tenantWhere(tenant);
+    const stocks = await qr.manager.find(MatStock, {
+      where: { itemCode, matUid, ...tenantWhere },
+      order: { createdAt: 'ASC' },
+    });
+    for (const stock of stocks) {
+      this.assertSameTenant('자동차감 차감 재고', tenant, stock);
+    }
+
+    let remaining = totalDeduct;
+    for (const stock of stocks) {
+      if (remaining <= 0) break;
+      const deduct = Math.min(remaining, stock.qty);
+      remaining -= deduct;
+
+      await qr.manager.update(
+        MatStock,
+        { warehouseCode: stock.warehouseCode, itemCode, matUid, ...tenantWhere },
+        {
+          qty: stock.qty - deduct,
+          availableQty: Math.max(0, stock.availableQty - deduct),
+        },
+      );
+    }
+  }
+}

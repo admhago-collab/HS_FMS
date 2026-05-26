@@ -1,0 +1,92 @@
+/**
+ * @file src/modules/material/dto/iqc-history.dto.ts
+ * @description IQC 이력 조회 전용 DTO
+ */
+
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsString, IsOptional, IsInt, Min, Max, IsDateString, IsIn, IsNotEmpty } from 'class-validator';
+import { Type } from 'class-transformer';
+import { PaginationQueryDto } from '../../../common/dto/base-query.dto';
+
+export class CreateIqcResultDto {
+  @ApiProperty({ description: '자재 UID' })
+  @IsString()
+  matUid: string;
+
+  @ApiProperty({ description: '검사 결과', enum: ['PASS', 'FAIL'] })
+  @IsString()
+  @IsIn(['PASS', 'FAIL'])
+  result: string;
+
+  @ApiPropertyOptional({ description: '검사자' })
+  @IsOptional()
+  @IsString()
+  inspectorName?: string;
+
+  @ApiPropertyOptional({ description: '비고' })
+  @IsOptional()
+  @IsString()
+  remark?: string;
+
+  @ApiPropertyOptional({ description: '검사유형', enum: ['INITIAL', 'RETEST'], default: 'INITIAL' })
+  @IsOptional()
+  @IsString()
+  @IsIn(['INITIAL', 'RETEST'])
+  inspectType?: string;
+
+  @ApiPropertyOptional({ description: '검사항목별 계측값 상세 (JSON)' })
+  @IsOptional()
+  @IsString()
+  details?: string;
+
+  @ApiPropertyOptional({ description: '검사분류', enum: ['FULL', 'SAMPLE', 'NONE'] })
+  @IsOptional()
+  @IsString()
+  @IsIn(['FULL', 'SAMPLE', 'NONE'])
+  inspectClass?: string;
+
+  @ApiPropertyOptional({ description: '파괴검사 시료 수량' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  destructSampleQty?: number;
+}
+
+export class CancelIqcResultDto {
+  @ApiProperty({ description: '취소 사유' })
+  @IsString()
+  @IsNotEmpty()
+  reason: string;
+}
+
+export class IqcHistoryQueryDto extends PaginationQueryDto {
+
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  search?: string;
+
+  @ApiPropertyOptional({ enum: ['INITIAL', 'RETEST'] })
+  @IsOptional()
+  @IsString()
+  @IsIn(['INITIAL', 'RETEST'])
+  inspectType?: string;
+
+  @ApiPropertyOptional({ enum: ['PASS', 'FAIL'] })
+  @IsOptional()
+  @IsString()
+  @IsIn(['PASS', 'FAIL'])
+  result?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsDateString()
+  fromDate?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsDateString()
+  toDate?: string;
+}

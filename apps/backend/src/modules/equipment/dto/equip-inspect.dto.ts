@@ -1,0 +1,141 @@
+/**
+ * @file src/modules/equipment/dto/equip-inspect.dto.ts
+ * @description 설비 점검 관련 DTO 정의 (일상점검 + 정기점검 공용)
+ *
+ * 초보자 가이드:
+ * 1. **CreateEquipInspectDto**: 점검 결과 등록 시 사용
+ * 2. **UpdateEquipInspectDto**: 점검 결과 수정 시 사용
+ * 3. **EquipInspectQueryDto**: 점검 이력 조회 필터링
+ *
+ * inspectType: DAILY(일상) / PERIODIC(정기)
+ * overallResult: PASS / FAIL / CONDITIONAL
+ */
+
+import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
+import {
+  IsString,
+  IsOptional,
+  IsInt,
+  IsDateString,
+  Min,
+  Max,
+  MaxLength,
+  IsIn,
+  IsObject,
+} from 'class-validator';
+import { Type } from 'class-transformer';
+import { PaginationQueryDto } from '../../../common/dto/base-query.dto';
+
+const INSPECT_TYPE = ['DAILY', 'PERIODIC', 'WORKER'] as const;
+const OVERALL_RESULT = ['PASS', 'FAIL', 'CONDITIONAL'] as const;
+
+/** 설비 점검 생성 DTO */
+export class CreateEquipInspectDto {
+  @ApiProperty({ description: '설비 ID' })
+  @IsString()
+  equipCode: string;
+
+  @ApiProperty({ description: '점검 유형', enum: INSPECT_TYPE })
+  @IsString()
+  @IsIn([...INSPECT_TYPE])
+  inspectType: string;
+
+  @ApiProperty({ description: '점검일 (YYYY-MM-DD)' })
+  @IsDateString()
+  inspectDate: string;
+
+  @ApiPropertyOptional({ description: '점검자명', maxLength: 50 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  inspectorName?: string;
+
+  @ApiPropertyOptional({ description: '종합 결과', enum: OVERALL_RESULT, default: 'PASS' })
+  @IsOptional()
+  @IsString()
+  @IsIn([...OVERALL_RESULT])
+  overallResult?: string;
+
+  @ApiPropertyOptional({ description: '점검 상세 (항목별 결과 JSON)' })
+  @IsOptional()
+  @IsObject()
+  details?: Record<string, unknown>;
+
+  @ApiPropertyOptional({ description: '비고', maxLength: 500 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  remark?: string;
+}
+
+/** 설비 점검 수정 DTO */
+export class UpdateEquipInspectDto extends PartialType(CreateEquipInspectDto) {}
+
+/** 점검 캘린더 월별 조회 DTO */
+export class InspectCalendarQueryDto extends PaginationQueryDto {
+  @ApiProperty({ description: '년도' })
+  @Type(() => Number)
+  @IsInt()
+  year: number;
+
+  @ApiProperty({ description: '월' })
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(12)
+  month: number;
+
+  @ApiPropertyOptional({ description: '공정코드 필터' })
+  @IsOptional()
+  @IsString()
+  processCode?: string;
+}
+
+/** 점검 캘린더 일별 스케줄 조회 DTO */
+export class InspectDayScheduleQueryDto extends PaginationQueryDto {
+  @ApiProperty({ description: '날짜 (YYYY-MM-DD)' })
+  @IsString()
+  date: string;
+
+  @ApiPropertyOptional({ description: '공정코드 필터' })
+  @IsOptional()
+  @IsString()
+  processCode?: string;
+}
+
+/** 설비 점검 목록 조회 쿼리 DTO */
+export class EquipInspectQueryDto extends PaginationQueryDto {
+
+
+  @ApiPropertyOptional({ description: '설비 ID' })
+  @IsOptional()
+  @IsString()
+  equipCode?: string;
+
+  @ApiPropertyOptional({ description: '점검 유형', enum: INSPECT_TYPE })
+  @IsOptional()
+  @IsString()
+  @IsIn([...INSPECT_TYPE])
+  inspectType?: string;
+
+  @ApiPropertyOptional({ description: '종합 결과', enum: OVERALL_RESULT })
+  @IsOptional()
+  @IsString()
+  @IsIn([...OVERALL_RESULT])
+  overallResult?: string;
+
+  @ApiPropertyOptional({ description: '검색어 (설비코드, 점검자명)' })
+  @IsOptional()
+  @IsString()
+  search?: string;
+
+  @ApiPropertyOptional({ description: '점검일 시작 (YYYY-MM-DD)' })
+  @IsOptional()
+  @IsDateString()
+  inspectDateFrom?: string;
+
+  @ApiPropertyOptional({ description: '점검일 종료 (YYYY-MM-DD)' })
+  @IsOptional()
+  @IsDateString()
+  inspectDateTo?: string;
+}

@@ -1,0 +1,181 @@
+/**
+ * @file receive-label.service.ts
+ * @description 자재 라벨 발행 서비스 — IQC PASS 입하건 → matUid 채번 → MatLot 생성 → 라벨 인쇄
+ *
+ * 초보자 가이드:
+ * 1. findLabelableArrivals(): IQC PASS 상태인 입하건 목록 조회
+ * 2. createMatLabels(): 입하건 선택 → qty만큼 matUid 채번 → MatLot N건 생성 → 인쇄 로그 저장
+ * 3. matUid 채번은 Oracle DB Function(F_GET_MAT_UID) 호출
+ */
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, In } from 'typeorm';
+import { MatArrival } from '../../../entities/mat-arrival.entity';
+import { MatLot } from '../../../entities/mat-lot.entity';
+import { PartMaster } from '../../../entities/part-master.entity';
+import { LabelPrintLog } from '../../../entities/label-print-log.entity';
+import { NumberingService } from '../../../shared/numbering.service';
+import { CreateMatLabelsDto, MatLabelResultDto } from '../dto/receive-label.dto';
+import { TransactionService } from '../../../shared/transaction.service';
+
+@Injectable()
+export class ReceiveLabelService {
+  constructor(
+    private readonly tx: TransactionService,
+    private readonly numbering: NumberingService,
+    @InjectRepository(MatArrival)
+    private readonly arrivalRepo: Repository<MatArrival>,
+    @InjectRepository(MatLot)
+    private readonly matLotRepo: Repository<MatLot>,
+    @InjectRepository(PartMaster)
+    private readonly partRepo: Repository<PartMaster>,
+    @InjectRepository(LabelPrintLog)
+    private readonly printLogRepo: Repository<LabelPrintLog>,
+  ) {}
+
+  private tenantWhere(company?: string | null, plant?: string | null) {
+    return {
+      ...(company ? { company } : {}),
+      ...(plant ? { plant } : {}),
+    };
+  }
+
+  private assertSameTenant(
+    context: string,
+    row: { company?: string | null; plant?: string | null },
+    company?: string | null,
+    plant?: string | null,
+  ) {
+    if (company && row.company !== company) {
+      throw new BadRequestException(`${context} 회사 정보가 일치하지 않습니다. request=${company}, row=${row.company ?? 'NULL'}`);
+    }
+    if (plant && row.plant !== plant) {
+      throw new BadRequestException(`${context} 사업장 정보가 일치하지 않습니다. request=${plant}, row=${row.plant ?? 'NULL'}`);
+    }
+  }
+
+  /** IQC PASS + 라벨 미발행 입하건 조회 */
+  async findLabelableArrivals(company?: string, plant?: string) {
+    const tenantWhere = this.tenantWhere(company, plant);
+    const queryBuilder = this.arrivalRepo
+      .createQueryBuilder('a')
+      .where('a.iqcStatus = :status', { status: 'PASS' })
+      .andWhere('a.status != :cancelled', { cancelled: 'CANCELLED' });
+
+    if (company) queryBuilder.andWhere('a.company = :company', { company });
+    if (plant) queryBuilder.andWhere('a.plant = :plant', { plant });
+
+    const arrivals = await queryBuilder
+      .orderBy('a.createdAt', 'DESC')
+      .getMany();
+
+    // 필요한 itemCodes만 IN 배치 조회
+    const neededItemCodes = [...new Set(arrivals.map((a) => a.itemCode).filter(Boolean))];
+    const parts = neededItemCodes.length > 0
+      ? await this.partRepo.find({ where: { itemCode: In(neededItemCodes), ...tenantWhere } })
+      : [];
+    const partMap = new Map(parts.map((p) => [p.itemCode, p] as const));
+
+    const printLogs = await this.printLogRepo
+      .createQueryBuilder('log')
+      .select('log.uidList')
+      .where('log.category = :cat', { cat: 'mat_uid' })
+      .andWhere('log.status = :st', { st: 'SUCCESS' })
+      .getMany();
+    const printedUids = new Set<string>();
+    for (const log of printLogs) {
+      if (log.uidList) {
+        try {
+          const ids = JSON.parse(log.uidList);
+          if (Array.isArray(ids)) ids.forEach((id: string) => printedUids.add(id));
+        } catch { /* ignore */ }
+      }
+    }
+
+    // 필요한 matUids만 IN 배치 조회 (printedUids에 해당하는 것만)
+    const labeledArrivalKeys = new Set<string>();
+    const neededMatUids = [...printedUids];
+    const lots = neededMatUids.length > 0
+      ? await this.matLotRepo.find({ where: { matUid: In(neededMatUids), ...tenantWhere } })
+      : [];
+    for (const lot of lots) {
+      if (printedUids.has(lot.matUid)) {
+        const arrival = arrivals.find(
+          (a) => a.itemCode === lot.itemCode && a.poNo === lot.poNo,
+        );
+        if (arrival) labeledArrivalKeys.add(`${arrival.arrivalNo}-${arrival.seq}`);
+      }
+    }
+
+    return arrivals.map((a) => {
+      const part = partMap.get(a.itemCode);
+      return {
+        arrivalNo: a.arrivalNo,
+        seq: a.seq,
+        itemCode: a.itemCode,
+        itemName: part?.itemName ?? '',
+        unit: part?.unit ?? '',
+        qty: a.qty,
+        poNo: a.poNo,
+        vendor: a.vendorName,
+        supUid: a.supUid,
+        invoiceNo: a.invoiceNo,
+        iqcStatus: a.iqcStatus,
+        arrivalDate: a.arrivalDate,
+        labelPrinted: labeledArrivalKeys.has(`${a.arrivalNo}-${a.seq}`),
+      };
+    });
+  }
+
+  /** matUid 채번 + MatLot 생성 + 라벨 인쇄 로그 */
+  async createMatLabels(dto: CreateMatLabelsDto, company?: string, plant?: string): Promise<MatLabelResultDto[]> {
+    const tenantWhere = this.tenantWhere(company, plant);
+    const arrival = await this.arrivalRepo.findOne({ where: { arrivalNo: dto.arrivalId, seq: dto.arrivalSeq ?? 1, ...tenantWhere } });
+    if (!arrival) throw new NotFoundException('입하건을 찾을 수 없습니다.');
+    this.assertSameTenant('자재라벨 입하건', arrival, company, plant);
+    if (arrival.iqcStatus !== 'PASS') {
+      throw new NotFoundException('IQC 합격 상태가 아닙니다.');
+    }
+
+    const part = await this.partRepo.findOne({ where: { itemCode: arrival.itemCode, ...tenantWhere } });
+
+    return this.tx.run(async (queryRunner) => {
+      const results: MatLabelResultDto[] = [];
+
+      for (let i = 0; i < dto.qty; i++) {
+        const matUid = await this.numbering.nextMatUid(queryRunner);
+        const lot = queryRunner.manager.create(MatLot, {
+          matUid,
+          itemCode: arrival.itemCode,
+          initQty: 1,
+          recvDate: new Date(),
+          poNo: arrival.poNo,
+          vendor: arrival.vendorName,
+          company: arrival.company,
+          plant: arrival.plant,
+          arrivalNo: arrival.arrivalNo,
+          arrivalSeq: arrival.seq,
+        });
+        await queryRunner.manager.save(lot);
+
+        results.push({
+          matUid,
+          itemCode: arrival.itemCode,
+          itemName: part?.itemName ?? '',
+          supUid: dto.supUid ?? arrival.supUid ?? null,
+        });
+      }
+
+      const log = queryRunner.manager.create(LabelPrintLog, {
+        category: 'mat_uid',
+        printMode: 'BROWSER',
+        uidList: JSON.stringify(results.map((r) => r.matUid)),
+        labelCount: dto.qty,
+        status: 'SUCCESS',
+      });
+      await queryRunner.manager.save(log);
+
+      return results;
+    });
+  }
+}

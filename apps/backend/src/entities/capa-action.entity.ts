@@ -1,0 +1,53 @@
+/**
+ * @file capa-action.entity.ts
+ * @description CAPA 조치 항목 엔티티 — 시정/예방 조치의 개별 실행 항목
+ *
+ * 초보자 가이드:
+ * 1. 하나의 CAPA 요청에 여러 조치 항목이 연결됨 (1:N 관계)
+ * 2. 복합 PK: capaId + seq (부모 FK + 순번)
+ * 3. 각 항목은 담당자, 기한, 진행 상태를 개별 관리
+ * 4. 상태: PENDING → IN_PROGRESS → DONE
+ */
+import {
+  Entity, PrimaryColumn, Column,
+  ManyToOne, JoinColumn,
+  CreateDateColumn, UpdateDateColumn,
+} from 'typeorm';
+import { CAPARequest } from './capa-request.entity';
+
+@Entity({ name: 'CAPA_ACTIONS' })
+export class CAPAAction {
+  @PrimaryColumn({ name: 'CAPA_ID', length: 30 })
+  capaId: string;
+
+  @ManyToOne(() => CAPARequest, { nullable: false })
+  @JoinColumn({ name: 'CAPA_ID', referencedColumnName: 'capaNo' })
+  capaRequest: CAPARequest;
+
+  @PrimaryColumn({ name: 'SEQ', type: 'int' })
+  seq: number;
+
+  @Column({ name: 'ACTION_DESC', length: 1000 })
+  actionDesc: string;
+
+  @Column({ type: 'varchar2', name: 'RESPONSIBLE_CODE', length: 50, nullable: true })
+  responsibleCode: string;
+
+  @Column({ name: 'DUE_DATE', type: 'date', nullable: true })
+  dueDate: Date;
+
+  @Column({ name: 'STATUS', length: 20, default: 'PENDING' })
+  status: string;
+
+  @Column({ type: 'varchar2', name: 'RESULT', length: 1000, nullable: true })
+  result: string;
+
+  @Column({ name: 'COMPLETED_AT', type: 'timestamp', nullable: true })
+  completedAt: Date;
+
+  @CreateDateColumn({ name: 'CREATED_AT', type: 'timestamp' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'UPDATED_AT', type: 'timestamp' })
+  updatedAt: Date;
+}

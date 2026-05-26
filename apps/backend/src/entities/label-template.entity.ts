@@ -1,0 +1,69 @@
+/**
+ * @file entities/label-template.entity.ts
+ * @description 라벨 템플릿 엔티티 - 라벨 디자인/ZPL 템플릿을 관리한다.
+ *              복합 PK: templateName + category
+ *
+ * 초보자 가이드:
+ * 1. templateName + category가 복합 PK (자연키)
+ * 3. designData: 라벨 디자인 JSON (CLOB)
+ * 4. zplCode: ZPL 프린터용 코드 (CLOB)
+ * 5. printMode: BROWSER(브라우저) / ZPL(직접출력)
+ */
+import {
+  Entity,
+  PrimaryColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  Index,
+} from 'typeorm';
+
+@Entity({ name: 'LABEL_TEMPLATES' })
+@Index(['category'])
+@Index(['isDefault'])
+export class LabelTemplate {
+  @PrimaryColumn({ name: 'TEMPLATE_NAME', length: 100 })
+  templateName: string;
+
+  @PrimaryColumn({ name: 'CATEGORY', length: 50 })
+  category: string;
+
+  @Column({ name: 'DESIGN_DATA', type: 'clob' })
+  designData: string;
+
+  @Column({ name: 'IS_DEFAULT', default: false })
+  isDefault: boolean;
+
+  @Column({ type: 'varchar2', name: 'REMARK', length: 500, nullable: true })
+  remark: string | null;
+
+  @Column({ name: 'ZPL_CODE', type: 'clob', nullable: true })
+  zplCode: string | null;
+
+  @Column({ name: 'PRINT_MODE', length: 20, default: 'BROWSER' })
+  printMode: string;
+
+  @Column({ type: 'varchar2', name: 'PRINTER_ID', length: 36, nullable: true })
+  printerId: string | null;
+
+  @Column({ name: 'USE_YN', length: 1, default: 'Y' })
+  useYn: string;
+
+  @Column({ type: 'varchar2', name: 'COMPANY', length: 50, nullable: true })
+  company: string | null;
+
+  @Column({ type: 'varchar2', name: 'PLANT_CD', length: 50, nullable: true })
+  plant: string | null;
+
+  @Column({ type: 'varchar2', name: 'CREATED_BY', length: 50, nullable: true })
+  createdBy: string | null;
+
+  @Column({ type: 'varchar2', name: 'UPDATED_BY', length: 50, nullable: true })
+  updatedBy: string | null;
+
+  @CreateDateColumn({ name: 'CREATED_AT', type: 'timestamp' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'UPDATED_AT', type: 'timestamp' })
+  updatedAt: Date;
+}

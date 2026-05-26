@@ -1,0 +1,68 @@
+/**
+ * @file iqc-item-master.entity.ts
+ * @description IQC 검사항목 마스터(IqcItemMaster) 엔티티 - 품목별 검사항목을 정의한다.
+ *              company + plant + itemCode + seq 복합 PK를 사용한다.
+ *
+ * 초보자 가이드:
+ * 1. company + plant + itemCode + seq가 복합 PK (자연키)
+ * 2. ITEM_CODE로 ItemMaster(품목)를 참조
+ * 3. SEQ로 검사 순서 관리
+ */
+import {
+  Entity,
+  PrimaryColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+} from 'typeorm';
+
+@Entity({ name: 'IQC_ITEM_MASTERS' })
+export class IqcItemMaster {
+  @PrimaryColumn({ type: 'varchar2', name: 'COMPANY', length: 50 })
+  company: string;
+
+  @PrimaryColumn({ type: 'varchar2', name: 'PLANT_CD', length: 50 })
+  plant: string;
+
+  @PrimaryColumn({ name: 'ITEM_CODE', length: 50 })
+  itemCode: string;
+
+  @PrimaryColumn({ name: 'SEQ', type: 'int' })
+  seq: number;
+
+  @Column({ name: 'INSPECT_ITEM', length: 255 })
+  inspectItem: string;
+
+  @Column({ type: 'varchar2', name: 'SPEC', length: 255, nullable: true })
+  spec: string | null;
+
+  @Column({ name: 'LSL', type: 'decimal', precision: 10, scale: 4, nullable: true })
+  lsl: number | null;
+
+  @Column({ name: 'USL', type: 'decimal', precision: 10, scale: 4, nullable: true })
+  usl: number | null;
+
+  @Column({ type: 'varchar2', name: 'UNIT', length: 20, nullable: true })
+  unit: string | null;
+
+  @Column({ name: 'IS_SHELF_LIFE', default: false })
+  isShelfLife: boolean;
+
+  @Column({ name: 'RETEST_CYCLE', type: 'int', nullable: true })
+  retestCycle: number | null;
+
+  @Column({ name: 'USE_YN', length: 1, default: 'Y' })
+  useYn: string;
+
+  @Column({ type: 'varchar2', name: 'CREATED_BY', length: 50, nullable: true })
+  createdBy: string | null;
+
+  @Column({ type: 'varchar2', name: 'UPDATED_BY', length: 50, nullable: true })
+  updatedBy: string | null;
+
+  @CreateDateColumn({ name: 'CREATED_AT', type: 'timestamp' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'UPDATED_AT', type: 'timestamp' })
+  updatedAt: Date;
+}

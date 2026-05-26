@@ -1,0 +1,262 @@
+/**
+ * @file src/modules/quality/continuity-inspect/dto/continuity-inspect.dto.ts
+ * @description 통전검사 관련 DTO 정의
+ *
+ * 초보자 가이드:
+ * 1. ContinuityInspectDto: 통전검사 결과 등록 시 필요한 필드
+ * 2. VoidLabelDto: FG 라벨 취소 시 사유 입력
+ * 3. passYn='Y' → FG_BARCODE 자동 채번, 'N' → 불량 기록만
+ */
+
+import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
+import { IsString, IsOptional, IsInt, IsIn, Min, MaxLength } from 'class-validator';
+
+/**
+ * 통전검사 결과 등록 DTO
+ */
+export class ContinuityInspectDto {
+  @ApiProperty({ description: '작업지시 번호', example: 'JO-20260316-001' })
+  @IsString()
+  @MaxLength(50)
+  orderNo: string;
+
+  @ApiProperty({ description: '품목 코드', example: 'ITEM-001' })
+  @IsString()
+  @MaxLength(50)
+  itemCode: string;
+
+  @ApiPropertyOptional({ description: '설비 코드' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  equipCode?: string;
+
+  @ApiPropertyOptional({ description: '작업자 ID' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  workerId?: string;
+
+  @ApiPropertyOptional({ description: '라인 코드' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  lineCode?: string;
+
+  @ApiProperty({ description: '합격 여부', enum: ['Y', 'N'] })
+  @IsString()
+  passYn: string;
+
+  @ApiPropertyOptional({ description: '불량 코드', maxLength: 50 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  errorCode?: string;
+
+  @ApiPropertyOptional({ description: '불량 상세', maxLength: 500 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  errorDetail?: string;
+
+  @ApiPropertyOptional({ description: 'FG 바코드 (ON_PRODUCTION/PRE_ISSUE 모드에서 스캔값)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  fgBarcode?: string;
+
+  @ApiPropertyOptional({ description: '?곌껐???앹궛?ㅼ쟻 踰덊샇' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  prodResultNo?: string;
+}
+
+/**
+ * 장비 자동검사 DTO
+ */
+export class AutoInspectDto {
+  @ApiProperty({ description: '프로토콜 ID (EQUIP_PROTOCOLS.PROTOCOL_ID)', example: 'CONT-01' })
+  @IsString()
+  @MaxLength(30)
+  protocolId: string;
+
+  @ApiProperty({ description: '작업지시번호', example: 'JO-20260316-001' })
+  @IsString()
+  @MaxLength(50)
+  orderNo: string;
+
+  @ApiProperty({ description: '품목코드', example: 'ITEM-001' })
+  @IsString()
+  @MaxLength(50)
+  itemCode: string;
+
+  @ApiPropertyOptional({ description: '장비에서 수신한 raw 데이터 (시리얼/TCP에서 받은 문자열)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  rawData?: string;
+
+  @ApiPropertyOptional({ description: '이미 파싱된 결과 (JSON HTTP 방식)', enum: ['PASS', 'FAIL'] })
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  result?: string;
+
+  @ApiPropertyOptional({ description: '에러코드 (파싱된 경우)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  errorCode?: string;
+
+  @ApiPropertyOptional({ description: '설비코드' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  equipCode?: string;
+
+  @ApiPropertyOptional({ description: '작업자' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  workerId?: string;
+
+  @ApiPropertyOptional({ description: '라인코드' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  lineCode?: string;
+}
+
+/**
+ * FG 바코드 사전발행 DTO
+ */
+export class PreIssueDto {
+  @ApiProperty({ description: '작업지시번호' })
+  @IsString()
+  orderNo: string;
+
+  @ApiPropertyOptional({ description: '발행 수량 (미지정 시 planQty-기발행수)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  qty?: number;
+}
+
+/**
+ * 재검사 DTO
+ */
+export class ReInspectDto {
+  @ApiProperty({ description: '재검사 결과', enum: ['Y', 'N'] })
+  @IsString()
+  @IsIn(['Y', 'N'])
+  passYn: string;
+
+  @ApiPropertyOptional({ description: '불량코드' })
+  @IsOptional()
+  @IsString()
+  errorCode?: string;
+
+  @ApiPropertyOptional({ description: '비고' })
+  @IsOptional()
+  @IsString()
+  remark?: string;
+}
+
+/**
+ * FG 라벨 취소 DTO
+ */
+export class VoidLabelDto {
+  @ApiProperty({ description: '취소 사유', example: '라벨 인쇄 오류' })
+  @IsString()
+  @MaxLength(200)
+  reason: string;
+}
+
+export class CreateEquipProtocolDto {
+  @ApiProperty({ description: '프로토콜 ID' })
+  @IsString()
+  @MaxLength(30)
+  protocolId: string;
+
+  @ApiPropertyOptional({ description: '설비 코드' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  equipCode?: string;
+
+  @ApiProperty({ description: '프로토콜명' })
+  @IsString()
+  @MaxLength(100)
+  protocolName: string;
+
+  @ApiPropertyOptional({ description: '통신 유형', default: 'SERIAL' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  commType?: string;
+
+  @ApiPropertyOptional({ description: '구분자', default: ',' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  delimiter?: string;
+
+  @ApiPropertyOptional({ description: '결과 위치 index', default: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  resultIndex?: number;
+
+  @ApiPropertyOptional({ description: '합격 값', default: 'PASS' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  passValue?: string;
+
+  @ApiPropertyOptional({ description: '불합격 값', default: 'FAIL' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  failValue?: string;
+
+  @ApiPropertyOptional({ description: '에러 위치 index' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  errorIndex?: number;
+
+  @ApiPropertyOptional({ description: '데이터 시작 문자' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(5)
+  dataStartChar?: string;
+
+  @ApiPropertyOptional({ description: '데이터 종료 문자' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(5)
+  dataEndChar?: string;
+
+  @ApiPropertyOptional({ description: '샘플 데이터' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  sampleData?: string;
+
+  @ApiPropertyOptional({ description: '설명' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  description?: string;
+
+  @ApiPropertyOptional({ description: '사용 여부', default: 'Y' })
+  @IsOptional()
+  @IsString()
+  @IsIn(['Y', 'N'])
+  useYn?: string;
+}
+
+export class UpdateEquipProtocolDto extends PartialType(CreateEquipProtocolDto) {}

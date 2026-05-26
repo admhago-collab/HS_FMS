@@ -1,0 +1,95 @@
+/**
+ * @file src/entities/mat-issue.entity.ts
+ * @description 자재 출고 엔티티 - 작업지시 기반 자재 투입/출고 이력
+ *
+ * 초보자 가이드:
+ * - issueType: 출고 유형 (PRODUCTION, MANUAL, SCRAP 등)
+ * - 복합 PK: issueNo + seq (같은 출고번호의 여러 자재 행)
+ * - matUid: 출고 자재시리얼, orderNo: 작업지시 참조
+ * - prodResultNo: 생산실적 번호 (string, 자재 투입 이력 연결)
+ * - G8: issuerId/issuerName, receiverId/receiverName — 불출자/수령인 바코드 스캔
+ */
+import {
+  Entity,
+  PrimaryColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  Index,
+  ManyToOne,
+  JoinColumn,
+} from 'typeorm';
+
+
+@Entity({ name: 'MAT_ISSUES' })
+@Index(['orderNo'])
+@Index(['matUid'])
+@Index(['issueType'])
+export class MatIssue {
+  @PrimaryColumn({ name: 'ISSUE_NO', length: 50 })
+  issueNo: string;
+
+  @PrimaryColumn({ name: 'SEQ', type: 'int', default: 1 })
+  seq: number;
+
+  @Column({ type: 'varchar2', name: 'ORDER_NO', length: 50, nullable: true })
+  orderNo: string | null;
+
+  @Column({ type: 'varchar2', name: 'PROD_RESULT_ID', length: 50, nullable: true })
+  prodResultNo: string | null;
+
+  @Column({ name: 'MAT_UID', length: 50 })
+  matUid: string;
+
+  @Column({ name: 'ISSUE_QTY', type: 'int' })
+  issueQty: number;
+
+  @Column({ name: 'ISSUE_DATE', type: 'timestamp', default: () => 'CURRENT_TIMESTAMP' })
+  issueDate: Date;
+
+  @Column({ name: 'ISSUE_TYPE', length: 20 })
+  issueType: string;
+
+  @Column({ type: 'varchar2', name: 'WORKER_ID', length: 50, nullable: true })
+  workerId: string | null;
+
+  /** G8: 불출자 사번 (바코드 스캔) */
+  @Column({ type: 'varchar2', name: 'ISSUER_ID', length: 20, nullable: true })
+  issuerId: string | null;
+
+  /** G8: 불출자 이름 */
+  @Column({ type: 'varchar2', name: 'ISSUER_NAME', length: 50, nullable: true })
+  issuerName: string | null;
+
+  /** G8: 수령인 사번 (바코드 스캔) */
+  @Column({ type: 'varchar2', name: 'RECEIVER_ID', length: 20, nullable: true })
+  receiverId: string | null;
+
+  /** G8: 수령인 이름 */
+  @Column({ type: 'varchar2', name: 'RECEIVER_NAME', length: 50, nullable: true })
+  receiverName: string | null;
+
+  @Column({ type: 'varchar2', name: 'REMARK', length: 500, nullable: true })
+  remark: string | null;
+
+  @Column({ name: 'STATUS', length: 20, default: 'DONE' })
+  status: string;
+
+  @Column({ type: 'varchar2', name: 'COMPANY', length: 50, nullable: true })
+  company: string | null;
+
+  @Column({ type: 'varchar2', name: 'PLANT_CD', length: 50, nullable: true })
+  plant: string | null;
+
+  @Column({ type: 'varchar2', name: 'CREATED_BY', length: 50, nullable: true })
+  createdBy: string | null;
+
+  @Column({ type: 'varchar2', name: 'UPDATED_BY', length: 50, nullable: true })
+  updatedBy: string | null;
+
+  @CreateDateColumn({ name: 'CREATED_AT', type: 'timestamp' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'UPDATED_AT', type: 'timestamp' })
+  updatedAt: Date;
+}

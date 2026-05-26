@@ -1,0 +1,149 @@
+/**
+ * @file src/modules/master/services/company.service.ts
+ * @description 회사마스터 비즈니스 로직 서비스 - TypeORM Repository 패턴
+ *
+ * 초보자 가이드:
+ * 1. **findAll**: 페이지네이션 + 검색 지원 목록 조회
+ * 2. **findPublic**: 인증 없이 활성 회사 목록 (로그인 페이지용)
+ * 3. **CRUD**: 생성/수정/소프트삭제
+ */
+
+import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { CompanyMaster } from '../../../entities/company-master.entity';
+import { CreateCompanyDto, UpdateCompanyDto, CompanyQueryDto } from '../dto/company.dto';
+
+@Injectable()
+export class CompanyService {
+  constructor(
+    @InjectRepository(CompanyMaster)
+    private readonly companyRepository: Repository<CompanyMaster>,
+  ) {}
+
+  /** 회사 목록 조회 (페이지네이션 + 검색) */
+  async findAll(query: CompanyQueryDto) {
+    const { page = 1, limit = 10, search, useYn } = query;
+    const skip = (page - 1) * limit;
+
+    const queryBuilder = this.companyRepository.createQueryBuilder('company')
+
+    if (useYn) {
+      queryBuilder.andWhere('company.useYn = :useYn', { useYn });
+    }
+
+    if (search) {
+      const upper = search.toUpperCase();
+      queryBuilder.andWhere(
+        '(company.companyCode LIKE :search OR company.companyName LIKE :searchRaw OR company.bizNo LIKE :search)',
+        { search: `%${upper}%`, searchRaw: `%${search}%` }
+      );
+    }
+
+    const [data, total] = await Promise.all([
+      queryBuilder
+        .orderBy('company.companyCode', 'ASC')
+        .skip(skip)
+        .take(limit)
+        .getMany(),
+      queryBuilder.getCount(),
+    ]);
+
+    return { data, total, page, limit };
+  }
+
+  /** 공개 API — 활성 회사 목록 (로그인 페이지용, 인증 불필요, 중복 제거) */
+  async findPublic() {
+    const rows = await this.companyRepository
+      .createQueryBuilder('c')
+      .select('c.companyCode', 'companyCode')
+      .addSelect('MIN(c.companyName)', 'companyName')
+      .where('c.useYn = :useYn', { useYn: 'Y' })
+      .groupBy('c.companyCode')
+      .orderBy('c.companyCode', 'ASC')
+      .getRawMany();
+    return rows;
+  }
+
+  /** 공개 API — 회사별 사업장 목록 (로그인 페이지용, 인증 불필요) */
+  async findPlantsByCompany(companyCode: string) {
+    const rows = await this.companyRepository.find({
+      where: { companyCode, useYn: 'Y' },
+      select: ['plant', 'plantName', 'companyName'],
+      order: { plant: 'asc' },
+    });
+    return rows
+      .filter((r) => r.plant)
+      .map((r) => ({ plantCode: r.plant, plantName: r.plantName || r.plant }));
+  }
+
+  /** 상세 조회 */
+  async findById(id: string) {
+    // id is composite key encoded as "companyCode::plant"
+    const [companyCode, plant] = id.split('::');
+    const company = await this.companyRepository.findOne({
+      where: { companyCode, plant: plant || '-' },
+    });
+    if (!company) throw new NotFoundException(`회사를 찾을 수 없습니다: ${id}`);
+    return company;
+  }
+
+  /** 생성 */
+  async create(dto: CreateCompanyDto) {
+    const existing = await this.companyRepository.findOne({
+      where: { companyCode: dto.companyCode },
+    });
+    if (existing) throw new ConflictException(`이미 존재하는 회사 코드입니다: ${dto.companyCode}`);
+
+    const company = this.companyRepository.create({
+      companyCode: dto.companyCode,
+      companyName: dto.companyName,
+      bizNo: dto.bizNo,
+      ceoName: dto.ceoName,
+      address: dto.address,
+      tel: dto.tel,
+      fax: dto.fax,
+      email: dto.email,
+      remark: dto.remark,
+      useYn: dto.useYn ?? 'Y',
+    });
+
+    return this.companyRepository.save(company);
+  }
+
+  /** 수정 */
+  async update(id: string, dto: UpdateCompanyDto) {
+    await this.findById(id);
+    const updateData: Partial<Pick<
+      CompanyMaster,
+      | 'companyName'
+      | 'bizNo'
+      | 'ceoName'
+      | 'address'
+      | 'tel'
+      | 'fax'
+      | 'email'
+      | 'remark'
+      | 'useYn'
+    >> = {
+      ...(dto.companyName !== undefined ? { companyName: dto.companyName } : {}),
+      ...(dto.bizNo !== undefined ? { bizNo: dto.bizNo } : {}),
+      ...(dto.ceoName !== undefined ? { ceoName: dto.ceoName } : {}),
+      ...(dto.address !== undefined ? { address: dto.address } : {}),
+      ...(dto.tel !== undefined ? { tel: dto.tel } : {}),
+      ...(dto.fax !== undefined ? { fax: dto.fax } : {}),
+      ...(dto.email !== undefined ? { email: dto.email } : {}),
+      ...(dto.remark !== undefined ? { remark: dto.remark } : {}),
+      ...(dto.useYn !== undefined ? { useYn: dto.useYn } : {}),
+    };
+    await this.companyRepository.update(id, updateData);
+    return this.findById(id);
+  }
+
+  /** 소프트 삭제 */
+  async delete(id: string) {
+    await this.findById(id);
+    await this.companyRepository.delete(id);
+    return { id };
+  }
+}

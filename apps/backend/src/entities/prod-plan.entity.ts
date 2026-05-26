@@ -1,0 +1,80 @@
+/**
+ * @file src/entities/prod-plan.entity.ts
+ * @description 월간생산계획(ProdPlan) 엔티티 - 월별 생산 계획 정보를 관리한다.
+ *
+ * 초보자 가이드:
+ * 1. PLAN_NO가 자연키 PK (PP-YYYYMM-NNN)
+ * 2. ITEM_CODE로 PartMaster(품목)를 참조
+ * 3. STATUS: DRAFT → CONFIRMED → CLOSED 워크플로우
+ */
+import {
+  Entity,
+  PrimaryColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  Index,
+  ManyToOne,
+  JoinColumn,
+} from 'typeorm';
+import { PartMaster } from './part-master.entity';
+
+@Entity({ name: 'PROD_PLANS' })
+@Index(['planMonth'])
+@Index(['status'])
+export class ProdPlan {
+  @PrimaryColumn({ name: 'PLAN_NO', length: 50 })
+  planNo: string;
+
+  @Column({ name: 'PLAN_MONTH', length: 7 })
+  planMonth: string;
+
+  @Column({ name: 'ITEM_CODE', length: 50 })
+  itemCode: string;
+
+  @ManyToOne(() => PartMaster, { nullable: true })
+  @JoinColumn({ name: 'ITEM_CODE' })
+  part: PartMaster | null;
+
+  @Column({ name: 'ITEM_TYPE', length: 10 })
+  itemType: string;
+
+  @Column({ name: 'PLAN_QTY', type: 'int' })
+  planQty: number;
+
+  @Column({ name: 'ORDER_QTY', type: 'int', default: 0 })
+  orderQty: number;
+
+  @Column({ type: 'varchar2', name: 'CUSTOMER', length: 50, nullable: true })
+  customer: string | null;
+
+  @Column({ type: 'varchar2', name: 'LINE_CODE', length: 255, nullable: true })
+  lineCode: string | null;
+
+  @Column({ name: 'PRIORITY', type: 'int', default: 5 })
+  priority: number;
+
+  @Column({ name: 'STATUS', length: 20, default: 'DRAFT' })
+  status: string;
+
+  @Column({ type: 'varchar2', name: 'REMARK', length: 500, nullable: true })
+  remark: string | null;
+
+  @Column({ type: 'varchar2', name: 'COMPANY', length: 50, nullable: true })
+  company: string | null;
+
+  @Column({ type: 'varchar2', name: 'PLANT_CD', length: 50, nullable: true })
+  plant: string | null;
+
+  @Column({ type: 'varchar2', name: 'CREATED_BY', length: 50, nullable: true })
+  createdBy: string | null;
+
+  @Column({ type: 'varchar2', name: 'UPDATED_BY', length: 50, nullable: true })
+  updatedBy: string | null;
+
+  @CreateDateColumn({ name: 'CREATED_AT', type: 'timestamp' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'UPDATED_AT', type: 'timestamp' })
+  updatedAt: Date;
+}

@@ -1,0 +1,314 @@
+"use client";
+
+/**
+ * @file src/app/(authenticated)/master/part/page.tsx
+ * @description 품목 마스터 관리 페이지 - DB API 연동 (Oracle TM_ITEMS 기준 보강)
+ *
+ * 초보자 가이드:
+ * 1. **품목 목록**: GET /master/parts API로 실제 DB 데이터 조회
+ * 2. **IQC 설정**: iqcYn=Y 품목에만 IQC 검사기준 설정 버튼 표시
+ * 3. **CRUD**: 추가/수정/삭제 모두 API를 통해 DB에 반영
+ */
+
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import { useTranslation } from "react-i18next";
+import { Plus, Edit2, Trash2, Search, Package, RefreshCw, ImageIcon, Download } from "lucide-react";
+import { Card, CardContent, Button, Input, ConfirmModal } from "@/components/ui";
+import { ComCodeSelect, UseYnSelect } from "@/components/shared";
+import DataGrid from "@/components/data-grid/DataGrid";
+import { ColumnDef } from "@tanstack/react-table";
+import api from "@/services/api";
+import { createPartColumns, createUnitColumn } from "@/lib/table-utils";
+import { Part, PART_TYPE_COLORS, PRODUCT_TYPE_OPTIONS } from "./types";
+
+import PartFormPanel from "./components/PartFormPanel";
+
+export default function PartPage() {
+  const { t } = useTranslation();
+  const [parts, setParts] = useState<Part[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [searchText, setSearchText] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [partTypeFilter, setPartTypeFilter] = useState("");
+  const [useYnFilter, setUseYnFilter] = useState("");
+
+  const [erpSyncing, setErpSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [isPanelOpen, setIsPanelOpen] = useState(false);
+  const [editingPart, setEditingPart] = useState<Part | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Part | null>(null);
+  const panelAnimateRef = useRef(true);
+
+  /** 검색어 디바운스 (300ms) */
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(searchText), 300);
+    return () => clearTimeout(timer);
+  }, [searchText]);
+
+
+  /** DB에서 품목 목록 조회 */
+  const fetchParts = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params: Record<string, string | number> = { limit: 5000 };
+      if (partTypeFilter) params.itemType = partTypeFilter;
+      if (useYnFilter) params.useYn = useYnFilter;
+      if (debouncedSearch) params.search = debouncedSearch;
+
+      const partsRes = await api.get("/master/parts", { params });
+      const partsBody = partsRes.data;
+      if (partsBody.success) {
+        setParts(partsBody.data || []);
+        setTotal(partsBody.meta?.total || 0);
+      }
+    } catch {
+      setParts([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [partTypeFilter, useYnFilter, debouncedSearch]);
+
+  /** 초기 로드 */
+  useEffect(() => { fetchParts(); }, [fetchParts]);
+
+  const handleSearch = (val: string) => { setSearchText(val); };
+  const handleTypeFilter = (val: string) => { setPartTypeFilter(val); };
+
+  const handleDeleteConfirm = useCallback(async () => {
+    if (!deleteTarget) return;
+    try {
+      await api.delete(`/master/parts/${deleteTarget.itemCode}`);
+      fetchParts();
+    } catch (e: any) {
+      console.error("Delete failed:", e);
+    } finally {
+      setDeleteTarget(null);
+    }
+  }, [deleteTarget, fetchParts]);
+
+  const typeLabels = useMemo<Record<string, string>>(() => ({
+    RAW_MATERIAL: t("inventory.stock.raw", "원자재"),
+    SEMI_PRODUCT: t("inventory.stock.wip", "반제품"),
+    FINISHED: t("inventory.stock.fg", "완제품"),
+    CONSUMABLE: t("inventory.stock.consumable", "소모품"),
+  }), [t]);
+
+  const productTypeLabels = useMemo<Record<string, string>>(() => {
+    const map: Record<string, string> = {};
+    PRODUCT_TYPE_OPTIONS.forEach(o => { if (o.value) map[o.value] = o.label; });
+    return map;
+  }, []);
+
+
+  const columns = useMemo<ColumnDef<Part>[]>(() => [
+    {
+      id: "actions", header: t("common.actions"), size: 80,
+      meta: { align: "center" as const, filterType: "none" as const },
+      cell: ({ row }) => (
+        <div className="flex gap-1">
+          <button onClick={() => { panelAnimateRef.current = !isPanelOpen; setEditingPart(row.original); setIsPanelOpen(true); }} className="p-1 hover:bg-surface rounded">
+            <Edit2 className="w-4 h-4 text-primary" />
+          </button>
+          <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(row.original); }} className="p-1 hover:bg-surface rounded">
+            <Trash2 className="w-4 h-4 text-red-500" />
+          </button>
+        </div>
+      ),
+    },
+    { accessorKey: "itemNo", header: t("master.part.partNo", "품번"), size: 120, meta: { filterType: "text" as const } },
+    {
+      accessorKey: "imageUrl", header: t("master.part.image", "사진"), size: 55,
+      meta: { align: "center" as const, filterType: "none" as const },
+      cell: ({ getValue, row }) => {
+        const imageUrl = getValue() as string | null | undefined;
+        return imageUrl ? (
+          <img
+            src={imageUrl}
+            alt={row.original.itemName}
+            className="w-8 h-8 object-cover rounded border border-border bg-surface mx-auto"
+          />
+        ) : (
+          <ImageIcon className="w-4 h-4 text-text-muted mx-auto" />
+        );
+      },
+    },
+    ...createPartColumns<Part>(t).map(col => ({ ...col, size: 140 })),
+    {
+      accessorKey: "itemType", header: t("master.part.type"), size: 70,
+      meta: { filterType: "multi" as const },
+      cell: ({ getValue }) => {
+        const v = getValue() as Part["itemType"];
+        const cfg = PART_TYPE_COLORS[v];
+        return <span className={`px-2 py-0.5 text-xs rounded-full ${cfg?.color || ""}`}>{typeLabels[v] || v}</span>;
+      },
+    },
+    {
+      accessorKey: "productType", header: t("master.part.productType", "제품유형"), size: 80,
+      meta: { filterType: "multi" as const },
+      cell: ({ getValue }) => {
+        const v = getValue() as string;
+        return <span className="text-xs">{productTypeLabels[v] || v || "-"}</span>;
+      },
+    },
+    { accessorKey: "spec", header: t("master.part.spec"), size: 130, meta: { filterType: "text" as const } },
+    { accessorKey: "rev", header: t("master.part.rev", "Rev"), size: 45 },
+    { accessorKey: "custPartNo", header: t("master.part.custPartNo", "고객품번"), size: 120, meta: { filterType: "text" as const }, cell: ({ getValue }) => getValue() || "-" },
+    { accessorKey: "unit", header: t("master.part.unit"), size: 45 },
+    { accessorKey: "boxQty", header: t("master.part.boxQty", "박스입수"), size: 70, meta: { filterType: "number" as const } },
+    { accessorKey: "lotUnitQty", header: t("master.part.lotUnitQty", "LOT수량"), size: 75, meta: { filterType: "number" as const }, cell: ({ getValue }) => getValue() ?? "-" },
+    {
+      accessorKey: "iqcYn", header: t("master.part.iqcFlag", "IQC"), size: 50,
+      meta: { filterType: "multi" as const },
+      cell: ({ getValue }) => {
+        const v = getValue() as string;
+        return <span className={`px-1.5 py-0.5 text-xs rounded ${v === "Y" ? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300" : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400"}`}>{v}</span>;
+      },
+    },
+    {
+      accessorKey: "inspectMethod", header: t("master.part.inspectMethod", "검사방법"), size: 70,
+      meta: { filterType: "multi" as const },
+      cell: ({ getValue }) => {
+        const v = getValue() as string;
+        if (!v) return <span className="text-xs text-text-muted">-</span>;
+        const colors: Record<string, string> = {
+          FULL: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300",
+          SAMPLE: "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300",
+          SKIP: "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400",
+        };
+        const labels: Record<string, string> = {
+          FULL: t("master.part.inspect", "검사"),
+          SAMPLE: t("master.part.inspect", "검사"),
+          SKIP: t("master.part.inspectSkip", "무검사"),
+        };
+        return <span className={`px-2 py-0.5 text-xs rounded-full ${colors[v] || ""}`}>{labels[v] || v}</span>;
+      },
+    },
+    { accessorKey: "tactTime", header: t("master.part.tactTime", "택타임"), size: 65, meta: { filterType: "number" as const }, cell: ({ getValue }) => { const v = getValue() as number; return v > 0 ? `${v}s` : "-"; } },
+    { accessorKey: "expiryDate", header: t("master.part.expiryDate", "유효기간"), size: 70, meta: { filterType: "number" as const }, cell: ({ getValue }) => { const v = getValue() as number; return v > 0 ? `${v}일` : "-"; } },
+    { accessorKey: "packUnit", header: t("master.part.packUnit", "포장단위"), size: 70, cell: ({ getValue }) => getValue() || "-" },
+    { accessorKey: "storageLocation", header: t("master.part.storageLocation", "적재위치"), size: 90, cell: ({ getValue }) => getValue() || "-" },
+    { accessorKey: "vendor", header: t("master.part.vendor"), size: 90, meta: { filterType: "text" as const }, cell: ({ getValue }) => getValue() || "-" },
+    { accessorKey: "customer", header: t("master.part.customer"), size: 90, meta: { filterType: "text" as const }, cell: ({ getValue }) => getValue() || "-" },
+    {
+      accessorKey: "useYn", header: t("common.useYn", "사용여부"), size: 60,
+      meta: { filterType: "multi" as const },
+      cell: ({ getValue }) => {
+        const v = getValue() as string;
+        return (
+          <span className={`px-1.5 py-0.5 text-xs rounded ${v === "Y" 
+            ? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300" 
+            : "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300"}`}>
+            {v === "Y" ? "Y" : "N"}
+          </span>
+        );
+      },
+    },
+  ], [t, typeLabels, productTypeLabels, isPanelOpen]);
+
+  const handlePanelClose = useCallback(() => {
+    setIsPanelOpen(false);
+    setEditingPart(null);
+    panelAnimateRef.current = true;
+  }, []);
+
+  const handlePanelSave = useCallback(() => {
+    fetchParts();
+  }, [fetchParts]);
+
+  const handleErpSync = useCallback(async () => {
+    setErpSyncing(true);
+    setSyncResult(null);
+    try {
+      const res = await api.post("/interface/inbound/item-master");
+      const { insert, update } = res.data.data ?? {};
+      setSyncResult({ ok: true, msg: `동기화 완료 — 신규 ${insert ?? 0}건, 변경 ${update ?? 0}건` });
+      fetchParts();
+    } catch (e: any) {
+      setSyncResult({ ok: false, msg: `동기화 실패: ${e?.response?.data?.message ?? e.message}` });
+    } finally {
+      setErpSyncing(false);
+    }
+  }, [fetchParts]);
+
+  return (
+    <div className="flex h-full animate-fade-in">
+      {/* 좌측: 메인 콘텐츠 */}
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden p-6 gap-4">
+        <div className="flex justify-between items-center flex-shrink-0">
+          <div>
+            <h1 className="text-xl font-bold text-text flex items-center gap-2">
+              <Package className="w-7 h-7 text-primary" />{t("master.part.title")}
+            </h1>
+            <p className="text-text-muted mt-1">{t("master.part.subtitle")} ({total}건)</p>
+          </div>
+          <div className="flex gap-2 items-center">
+            {syncResult && (
+              <span className={`text-xs px-3 py-1.5 rounded border ${syncResult.ok ? "bg-green-50 text-green-700 border-green-300 dark:bg-green-900/30 dark:text-green-400 dark:border-green-700" : "bg-red-50 text-red-700 border-red-300 dark:bg-red-900/30 dark:text-red-400 dark:border-red-700"}`}>
+                {syncResult.msg}
+              </span>
+            )}
+            <Button variant="secondary" size="sm" onClick={handleErpSync} disabled={erpSyncing}>
+              <Download className={`w-4 h-4 mr-1 ${erpSyncing ? "animate-bounce" : ""}`} />ERP 동기화
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => { fetchParts(); }}>
+              <RefreshCw className={`w-4 h-4 mr-1 ${loading ? "animate-spin" : ""}`} />{t("common.refresh")}
+            </Button>
+            <Button size="sm" onClick={() => { panelAnimateRef.current = !isPanelOpen; setEditingPart(null); setIsPanelOpen(true); }}>
+              <Plus className="w-4 h-4 mr-1" />{t("master.part.addPart")}
+            </Button>
+          </div>
+        </div>
+
+        <Card className="flex-1 min-h-0 overflow-hidden" padding="none"><CardContent className="h-full p-4">
+          <DataGrid
+            data={parts}
+            columns={columns}
+            isLoading={loading}
+            enableColumnFilter
+            enableExport
+            enableColumnPinning
+            exportFileName={t("master.part.title")}
+            onRowClick={(row) => { if (isPanelOpen) setEditingPart(row); }}
+            rowClassName={(row) => row.useYn === "N" ? "!text-red-500 dark:!text-red-400" : ""}
+            toolbarLeft={
+              <div className="flex gap-3 flex-1 min-w-0">
+                <div className="flex-1 min-w-0">
+                  <Input placeholder={t("master.part.searchPlaceholder")} value={searchText}
+                    onChange={e => handleSearch(e.target.value)}
+                    leftIcon={<Search className="w-4 h-4" />} fullWidth />
+                </div>
+                <div className="w-40 flex-shrink-0">
+                  <ComCodeSelect groupCode="ITEM_TYPE" value={partTypeFilter} onChange={handleTypeFilter} labelPrefix={t("master.part.type")} fullWidth />
+                </div>
+                <div className="w-36 flex-shrink-0">
+                  <UseYnSelect value={useYnFilter} onChange={setUseYnFilter} fullWidth />
+                </div>
+              </div>
+            }
+          />
+        </CardContent></Card>
+      </div>
+
+
+      {/* 우측: 품목 추가/수정 슬라이드 패널 */}
+      {isPanelOpen && (
+        <PartFormPanel
+          key={editingPart?.itemCode ?? "__new__"}
+          editingPart={editingPart}
+          onClose={handlePanelClose}
+          onSave={handlePanelSave}
+          animate={panelAnimateRef.current}
+        />
+      )}
+
+      <ConfirmModal
+        isOpen={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleDeleteConfirm}
+        variant="danger"
+        message={`'${deleteTarget?.itemCode || ""} (${deleteTarget?.itemName || ""})'을(를) 삭제하시겠습니까?`}
+      />
+    </div>
+  );
+}

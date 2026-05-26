@@ -1,0 +1,203 @@
+/**
+ * @file src/modules/customs/controllers/customs.controller.ts
+ * @description 보세관리 API 컨트롤러
+ *
+ * API 구조:
+ * - GET  /customs/entries                       : 수입신고 목록
+ * - GET  /customs/entries/:id                   : 수입신고 상세
+ * - POST /customs/entries                       : 수입신고 등록
+ * - PUT  /customs/entries/:id                   : 수입신고 수정
+ * - DELETE /customs/entries/:id                 : 수입신고 삭제
+ * - GET  /customs/lots/entry/:entryId           : 보세자재 LOT 목록
+ * - GET  /customs/lots/:entryNo/:matUid         : 보세자재 LOT 상세
+ * - POST /customs/lots                          : 보세자재 LOT 등록
+ * - PUT  /customs/lots/:entryNo/:matUid         : 보세자재 LOT 수정
+ * - GET  /customs/usage                         : 사용신고 목록
+ * - POST /customs/usage                         : 사용신고 등록
+ * - PUT  /customs/usage/:reportNo               : 사용신고 상태 변경
+ * - GET  /customs/summary                       : 보세관리 현황 요약
+ */
+
+import {
+  Controller,
+  Get,
+  Post,
+  Put,
+  Delete,
+  Body,
+  Param,
+  Query,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
+import { Company, Plant } from '../../../common/decorators/tenant.decorator';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiParam,
+} from '@nestjs/swagger';
+import { CustomsService } from '../services/customs.service';
+import {
+  CreateCustomsEntryDto,
+  UpdateCustomsEntryDto,
+  CustomsEntryQueryDto,
+  CreateCustomsLotDto,
+  UpdateCustomsLotDto,
+  CreateUsageReportDto,
+  UpdateUsageReportDto,
+  UsageReportQueryDto,
+} from '../dto/customs.dto';
+import { ResponseUtil } from '../../../common/dto/response.dto';
+
+@ApiTags('보세관리')
+@Controller('customs')
+export class CustomsController {
+  constructor(private readonly customsService: CustomsService) {}
+
+  // ===== 수입신고 =====
+
+  @Get('entries')
+  @ApiOperation({ summary: '수입신고 목록 조회' })
+  @ApiResponse({ status: 200, description: '조회 성공' })
+  async findAllEntries(@Query() query: CustomsEntryQueryDto, @Company() company: string, @Plant() plant: string) {
+    const result = await this.customsService.findAllEntries(query, company, plant);
+    return ResponseUtil.paged(result.data, result.total, result.page, result.limit);
+  }
+
+  @Get('entries/:id')
+  @ApiOperation({ summary: '수입신고 상세 조회' })
+  @ApiParam({ name: 'id', description: '수입신고번호 (entryNo)' })
+  @ApiResponse({ status: 200, description: '조회 성공' })
+  async findEntryById(@Param('id') id: string, @Company() company: string, @Plant() plant: string) {
+    const data = await this.customsService.findEntryById(id, company, plant);
+    return ResponseUtil.success(data);
+  }
+
+  @Post('entries')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: '수입신고 등록' })
+  @ApiResponse({ status: 201, description: '등록 성공' })
+  async createEntry(@Body() dto: CreateCustomsEntryDto, @Company() company: string, @Plant() plant: string) {
+    const data = await this.customsService.createEntry(dto, company, plant);
+    return ResponseUtil.success(data, '수입신고가 등록되었습니다.');
+  }
+
+  @Put('entries/:id')
+  @ApiOperation({ summary: '수입신고 수정' })
+  @ApiParam({ name: 'id', description: '수입신고번호 (entryNo)' })
+  @ApiResponse({ status: 200, description: '수정 성공' })
+  async updateEntry(
+    @Param('id') id: string,
+    @Body() dto: UpdateCustomsEntryDto,
+    @Company() company: string,
+    @Plant() plant: string,
+  ) {
+    const data = await this.customsService.updateEntry(id, dto, company, plant);
+    return ResponseUtil.success(data, '수입신고가 수정되었습니다.');
+  }
+
+  @Delete('entries/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: '수입신고 삭제' })
+  @ApiParam({ name: 'id', description: '수입신고번호 (entryNo)' })
+  @ApiResponse({ status: 200, description: '삭제 성공' })
+  async deleteEntry(@Param('id') id: string, @Company() company: string, @Plant() plant: string) {
+    await this.customsService.deleteEntry(id, company, plant);
+    return ResponseUtil.success(null, '수입신고가 삭제되었습니다.');
+  }
+
+  // ===== 보세자재 LOT (복합 PK: entryNo + matUid) =====
+
+  @Get('lots/entry/:entryId')
+  @ApiOperation({ summary: '수입신고별 보세자재 LOT 목록' })
+  @ApiParam({ name: 'entryId', description: '수입신고번호' })
+  @ApiResponse({ status: 200, description: '조회 성공' })
+  async findLotsByEntryId(@Param('entryId') entryId: string, @Company() company: string, @Plant() plant: string) {
+    const data = await this.customsService.findLotsByEntryId(entryId, company, plant);
+    return ResponseUtil.success(data);
+  }
+
+  @Get('lots/:entryNo/:matUid')
+  @ApiOperation({ summary: '보세자재 LOT 상세 조회' })
+  @ApiParam({ name: 'entryNo', description: '수입신고번호' })
+  @ApiParam({ name: 'matUid', description: '자재 UID' })
+  @ApiResponse({ status: 200, description: '조회 성공' })
+  async findLotByKey(
+    @Param('entryNo') entryNo: string,
+    @Param('matUid') matUid: string,
+    @Company() company: string,
+    @Plant() plant: string,
+  ) {
+    const data = await this.customsService.findLotByKey(entryNo, matUid, company, plant);
+    return ResponseUtil.success(data);
+  }
+
+  @Post('lots')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: '보세자재 LOT 등록' })
+  @ApiResponse({ status: 201, description: '등록 성공' })
+  async createLot(@Body() dto: CreateCustomsLotDto, @Company() company: string, @Plant() plant: string) {
+    const data = await this.customsService.createLot(dto, company, plant);
+    return ResponseUtil.success(data, '보세자재 LOT이 등록되었습니다.');
+  }
+
+  @Put('lots/:entryNo/:matUid')
+  @ApiOperation({ summary: '보세자재 LOT 수정' })
+  @ApiParam({ name: 'entryNo', description: '수입신고번호' })
+  @ApiParam({ name: 'matUid', description: '자재 UID' })
+  @ApiResponse({ status: 200, description: '수정 성공' })
+  async updateLot(
+    @Param('entryNo') entryNo: string,
+    @Param('matUid') matUid: string,
+    @Body() dto: UpdateCustomsLotDto,
+    @Company() company: string,
+    @Plant() plant: string,
+  ) {
+    const data = await this.customsService.updateLot(entryNo, matUid, dto, company, plant);
+    return ResponseUtil.success(data, '보세자재 LOT이 수정되었습니다.');
+  }
+
+  // ===== 사용신고 =====
+
+  @Get('usage')
+  @ApiOperation({ summary: '사용신고 목록 조회' })
+  @ApiResponse({ status: 200, description: '조회 성공' })
+  async findAllUsageReports(@Query() query: UsageReportQueryDto, @Company() company: string, @Plant() plant: string) {
+    const result = await this.customsService.findAllUsageReports(query, company, plant);
+    return ResponseUtil.paged(result.data, result.total, result.page, result.limit);
+  }
+
+  @Post('usage')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: '사용신고 등록' })
+  @ApiResponse({ status: 201, description: '등록 성공' })
+  async createUsageReport(@Body() dto: CreateUsageReportDto, @Company() company: string, @Plant() plant: string) {
+    const data = await this.customsService.createUsageReport(dto, company, plant);
+    return ResponseUtil.success(data, '사용신고가 등록되었습니다.');
+  }
+
+  @Put('usage/:reportNo')
+  @ApiOperation({ summary: '사용신고 상태 변경' })
+  @ApiParam({ name: 'reportNo', description: '사용신고 번호' })
+  @ApiResponse({ status: 200, description: '수정 성공' })
+  async updateUsageReport(
+    @Param('reportNo') reportNo: string,
+    @Body() dto: UpdateUsageReportDto,
+    @Company() company: string,
+    @Plant() plant: string,
+  ) {
+    const data = await this.customsService.updateUsageReport(reportNo, dto, company, plant);
+    return ResponseUtil.success(data, '사용신고가 수정되었습니다.');
+  }
+
+  // ===== 통계 =====
+
+  @Get('summary')
+  @ApiOperation({ summary: '보세관리 현황 요약' })
+  @ApiResponse({ status: 200, description: '조회 성공' })
+  async getCustomsSummary(@Company() company: string, @Plant() plant: string) {
+    const data = await this.customsService.getCustomsSummary(company, plant);
+    return ResponseUtil.success(data);
+  }
+}

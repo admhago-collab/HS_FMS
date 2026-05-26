@@ -1,0 +1,86 @@
+/**
+ * @file process-map.entity.ts
+ * @description 공정맵(ProcessMap) 엔티티 - 품목별 공정 순서를 정의한다.
+ *              복합 PK: ITEM_CODE + SEQ (자연키)
+ *
+ * 초보자 가이드:
+ * 1. 복합 PK: ITEM_CODE + SEQ 조합으로 라우팅 식별
+ * 2. ITEM_CODE로 ItemMaster(품목)를 참조
+ * 3. SEQ로 공정 순서를 관리
+ */
+import {
+  Entity,
+  PrimaryColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  Index,
+} from 'typeorm';
+
+@Entity({ name: 'PROCESS_MAPS' })
+@Index(['itemCode'])
+@Index(['processType'])
+export class ProcessMap {
+  @PrimaryColumn({ name: 'ITEM_CODE', length: 50 })
+  itemCode: string;
+
+  @PrimaryColumn({ name: 'SEQ', type: 'int' })
+  seq: number;
+
+  @Column({ name: 'PROCESS_CODE', length: 255 })
+  processCode: string;
+
+  @Column({ name: 'PROCESS_NAME', length: 255 })
+  processName: string;
+
+  @Column({ type: 'varchar2', name: 'PROCESS_TYPE', length: 255, nullable: true })
+  processType: string | null;
+
+  @Column({ type: 'varchar2', name: 'EQUIP_TYPE', length: 255, nullable: true })
+  equipType: string | null;
+
+  @Column({ name: 'STD_TIME', type: 'decimal', precision: 10, scale: 4, nullable: true })
+  stdTime: number | null;
+
+  @Column({ name: 'SETUP_TIME', type: 'decimal', precision: 10, scale: 4, nullable: true })
+  setupTime: number | null;
+
+  @Column({ name: 'WIRE_LENGTH', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  wireLength: number | null;
+
+  @Column({ name: 'STRIP_LENGTH', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  stripLength: number | null;
+
+  @Column({ name: 'CRIMP_HEIGHT', type: 'decimal', precision: 10, scale: 3, nullable: true })
+  crimpHeight: number | null;
+
+  @Column({ name: 'CRIMP_WIDTH', type: 'decimal', precision: 10, scale: 3, nullable: true })
+  crimpWidth: number | null;
+
+  @Column({ type: 'varchar2', name: 'WELD_CONDITION', length: 500, nullable: true })
+  weldCondition: string | null;
+
+  @Column({ type: 'varchar2', name: 'PROCESS_PARAMS', length: 2000, nullable: true })
+  processParams: string | null;
+
+  @Column({ name: 'USE_YN', length: 1, default: 'Y' })
+  useYn: string;
+
+  @Column({ type: 'varchar2', name: 'COMPANY', length: 50, nullable: true })
+  company: string | null;
+
+  @Column({ type: 'varchar2', name: 'PLANT_CD', length: 50, nullable: true })
+  plant: string | null;
+
+  @Column({ type: 'varchar2', name: 'CREATED_BY', length: 50, nullable: true })
+  createdBy: string | null;
+
+  @Column({ type: 'varchar2', name: 'UPDATED_BY', length: 50, nullable: true })
+  updatedBy: string | null;
+
+  @CreateDateColumn({ name: 'CREATED_AT', type: 'timestamp' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'UPDATED_AT', type: 'timestamp' })
+  updatedAt: Date;
+}

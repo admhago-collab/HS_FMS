@@ -1,0 +1,45 @@
+{
+  "extends": "../../packages/config/typescript/nest.json",
+  "compilerOptions": {
+    "baseUrl": "./",
+    "outDir": "./dist",
+    "paths": {
+      "@/*": ["src/*"],
+      "@common/*": ["src/common/*"],
+      "@modules/*": ["src/modules/*"],
+      "@test/*": ["test/utils/*"]
+    },
+    "skipLibCheck": true,
+    "strictNullChecks": false,
+    "strictPropertyInitialization": false,
+    "forceConsistentCasingInFileNames": true,
+    "noImplicitAny": false,
+    "strictBindCallApply": true,
+    "noFallthroughCasesInSwitch": true,
+    "noEmit": false
+  },
+  "include": ["src/**/*"],
+  "exclude": [
+    "node_modules", 
+    "dist", 
+    "src/database/migrate-*.ts", 
+    "src/database/test-connection.ts",
+    "src/seeds/**/*.ts",
+    "src/modules/consumables/**/*.ts",
+    "src/modules/inventory/services/warehouse.service.ts",
+    "src/modules/master/services/equip-inspect.service.ts",
+    "src/modules/master/services/iqc-item.service.ts",
+    "src/modules/master/services/label-template.service.ts",
+    "src/modules/master/services/model-suffix.service.ts",
+    "src/modules/master/services/process.service.ts",
+    "src/modules/master/services/prod-line.service.ts",
+    "src/modules/master/services/transfer-rule.service.ts",
+    "src/modules/master/services/work-instruction.service.ts",
+    "src/modules/material/services/adjustment.service.ts",
+    "src/modules/material/services/hold.service.ts",
+    "src/modules/material/services/iqc-history.service.ts",
+    "src/modules/material/services/lot-split.service.ts",
+    "src/modules/material/services/misc-receipt.service.ts",
+    "src/modules/common/guards/jwt-auth.guard.ts"
+  ]
+}

@@ -1,0 +1,75 @@
+/**
+ * @file src/modules/master/controllers/transfer-rule.controller.ts
+ * @description 창고이동규칙 CRUD API 컨트롤러
+ *
+ * 초보자 가이드:
+ * 1. **GET /master/transfer-rules**: 이동규칙 목록 (창고 필터)
+ * 2. **POST /master/transfer-rules**: 이동규칙 생성
+ * 3. **PUT /master/transfer-rules/:fromWarehouseId/:toWarehouseId**: 이동규칙 수정
+ * 4. **DELETE /master/transfer-rules/:fromWarehouseId/:toWarehouseId**: 이동규칙 삭제
+ */
+
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, HttpCode, HttpStatus } from '@nestjs/common';
+import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { Company, Plant } from '../../../common/decorators/tenant.decorator';
+import { TransferRuleService } from '../services/transfer-rule.service';
+import { CreateTransferRuleDto, UpdateTransferRuleDto, TransferRuleQueryDto } from '../dto/transfer-rule.dto';
+import { ResponseUtil } from '../../../common/dto/response.dto';
+
+@ApiTags('기준정보 - 창고이동규칙')
+@Controller('master/transfer-rules')
+export class TransferRuleController {
+  constructor(private readonly transferRuleService: TransferRuleService) {}
+
+  @Get()
+  @ApiOperation({ summary: '창고이동규칙 목록 조회' })
+  async findAll(@Query() query: TransferRuleQueryDto, @Company() company: string, @Plant() plant: string) {
+    const result = await this.transferRuleService.findAll(query, company, plant);
+    return ResponseUtil.paged(result.data, result.total, result.page, result.limit);
+  }
+
+  @Get(':fromWarehouseId/:toWarehouseId')
+  @ApiOperation({ summary: '창고이동규칙 상세 조회' })
+  async findByCompositeKey(
+    @Param('fromWarehouseId') fromWarehouseId: string,
+    @Param('toWarehouseId') toWarehouseId: string,
+    @Company() company: string,
+    @Plant() plant: string,
+  ) {
+    const data = await this.transferRuleService.findByCompositeKey(fromWarehouseId, toWarehouseId, company, plant);
+    return ResponseUtil.success(data);
+  }
+
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: '창고이동규칙 생성' })
+  async create(@Body() dto: CreateTransferRuleDto, @Company() company: string, @Plant() plant: string) {
+    const data = await this.transferRuleService.create(dto, company, plant);
+    return ResponseUtil.success(data, '창고이동규칙이 생성되었습니다.');
+  }
+
+  @Put(':fromWarehouseId/:toWarehouseId')
+  @ApiOperation({ summary: '창고이동규칙 수정' })
+  async update(
+    @Param('fromWarehouseId') fromWarehouseId: string,
+    @Param('toWarehouseId') toWarehouseId: string,
+    @Body() dto: UpdateTransferRuleDto,
+    @Company() company: string,
+    @Plant() plant: string,
+  ) {
+    const data = await this.transferRuleService.update(fromWarehouseId, toWarehouseId, dto, company, plant);
+    return ResponseUtil.success(data, '창고이동규칙이 수정되었습니다.');
+  }
+
+  @Delete(':fromWarehouseId/:toWarehouseId')
+  @ApiOperation({ summary: '창고이동규칙 삭제' })
+  async delete(
+    @Param('fromWarehouseId') fromWarehouseId: string,
+    @Param('toWarehouseId') toWarehouseId: string,
+    @Company() company: string,
+    @Plant() plant: string,
+  ) {
+    await this.transferRuleService.delete(fromWarehouseId, toWarehouseId, company, plant);
+    return ResponseUtil.success(null, '창고이동규칙이 삭제되었습니다.');
+  }
+}

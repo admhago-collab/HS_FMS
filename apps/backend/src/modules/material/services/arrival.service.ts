@@ -1,0 +1,992 @@
+/**
+ * @file src/modules/material/services/arrival.service.ts
+ * @description 입하관리 비즈니스 로직 - PO 기반/수동 입하 및 역분개 취소 (TypeORM)
+ *
+ * 초보자 가이드:
+ * 1. **PO 입하**: PurchaseOrder 기반 분할 입하 (receivedQty 누적, PO status 재계산)
+ * 2. **수동 입하**: PO 없이 직접 입하 등록
+ * 3. **입하 취소**: 역분개 방식 (원본 CANCELED + 반대 트랜잭션 생성)
+ * 4. **Stock upsert**: 입하 시 Stock 테이블 현재고 업데이트
+ *
+ * NOTE: LOT 생성은 라벨 발행 시점에 수행됨 (입하 시에는 LOT 미생성)
+ * NOTE: lotNo 필드는 matUid로 리네이밍됨 (자재 고유 식별자)
+ */
+
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, In, Between, DataSource, EntityManager, FindOptionsWhere } from 'typeorm';
+import { PurchaseOrder } from '../../../entities/purchase-order.entity';
+import { PurchaseOrderItem } from '../../../entities/purchase-order-item.entity';
+import { MatLot } from '../../../entities/mat-lot.entity';
+import { MatStock } from '../../../entities/mat-stock.entity';
+import { MatArrival } from '../../../entities/mat-arrival.entity';
+import { StockTransaction } from '../../../entities/stock-transaction.entity';
+import { PartMaster } from '../../../entities/part-master.entity';
+import { Warehouse } from '../../../entities/warehouse.entity';
+import { VendorBarcodeMapping } from '../../../entities/vendor-barcode-mapping.entity';
+import { IqcLog } from '../../../entities/iqc-log.entity';
+import { MatIssue } from '../../../entities/mat-issue.entity';
+import { ProdResult } from '../../../entities/prod-result.entity';
+import { FgLabel } from '../../../entities/fg-label.entity';
+import {
+  CreatePoArrivalDto,
+  CreateManualArrivalDto,
+  ArrivalQueryDto,
+  ArrivalStockQueryDto,
+  CancelArrivalDto,
+} from '../dto/arrival.dto';
+import { NumberingService } from '../../../shared/numbering.service';
+import { TransactionService } from '../../../shared/transaction.service';
+
+@Injectable()
+export class ArrivalService {
+  constructor(
+    @InjectRepository(PurchaseOrder)
+    private readonly purchaseOrderRepository: Repository<PurchaseOrder>,
+    @InjectRepository(PurchaseOrderItem)
+    private readonly purchaseOrderItemRepository: Repository<PurchaseOrderItem>,
+    @InjectRepository(MatLot)
+    private readonly matLotRepository: Repository<MatLot>,
+    @InjectRepository(MatStock)
+    private readonly matStockRepository: Repository<MatStock>,
+    @InjectRepository(MatArrival)
+    private readonly matArrivalRepository: Repository<MatArrival>,
+    @InjectRepository(StockTransaction)
+    private readonly stockTransactionRepository: Repository<StockTransaction>,
+    @InjectRepository(PartMaster)
+    private readonly partMasterRepository: Repository<PartMaster>,
+    @InjectRepository(Warehouse)
+    private readonly warehouseRepository: Repository<Warehouse>,
+    @InjectRepository(VendorBarcodeMapping)
+    private readonly vendorBarcodeMappingRepository: Repository<VendorBarcodeMapping>,
+    @InjectRepository(IqcLog)
+    private readonly iqcLogRepository: Repository<IqcLog>,
+    private readonly dataSource: DataSource,
+    private readonly numbering: NumberingService,
+    private readonly tx: TransactionService,
+  ) {}
+
+  private assertSameTenant(
+    context: string,
+    requested: { company?: string | null; plant?: string | null },
+    actual: { company?: string | null; plant?: string | null },
+  ) {
+    if (requested.company && actual.company !== requested.company) {
+      throw new BadRequestException(
+        `${context} 회사 정보가 일치하지 않습니다. request=${requested.company}, row=${actual.company ?? 'NULL'}`,
+      );
+    }
+    if (requested.plant && actual.plant !== requested.plant) {
+      throw new BadRequestException(
+        `${context} 사업장 정보가 일치하지 않습니다. request=${requested.plant}, row=${actual.plant ?? 'NULL'}`,
+      );
+    }
+  }
+
+  /** 입하 가능 PO 목록 조회 (CONFIRMED/PARTIAL 상태) */
+  async findReceivablePOs(company?: string, plant?: string) {
+    const where: FindOptionsWhere<PurchaseOrder> = {
+      status: In(['CONFIRMED', 'PARTIAL']),
+    };
+    if (company) where.company = company;
+    if (plant) where.plant = plant;
+
+    const pos = await this.purchaseOrderRepository.find({
+      where,
+      order: { orderDate: 'DESC' },
+    });
+
+    // PO 아이템 조회
+    const poNos = pos.map((po) => po.poNo);
+    const tenantWhere = {
+      ...(company ? { company } : {}),
+      ...(plant ? { plant } : {}),
+    };
+    const items = await this.purchaseOrderItemRepository.find({
+      where: { poNo: In(poNos), ...tenantWhere },
+    });
+
+    const itemCodes = items.map((item) => item.itemCode).filter(Boolean);
+    const parts = itemCodes.length > 0
+      ? await this.partMasterRepository.find({ where: { itemCode: In(itemCodes), ...tenantWhere } })
+      : [];
+    const partMap = new Map(parts.map((p) => [p.itemCode, p]));
+
+    // PO별 아이템 그룹화
+    const itemsByPoNo = new Map<string, typeof items>();
+    for (const item of items) {
+      if (!itemsByPoNo.has(item.poNo)) {
+        itemsByPoNo.set(item.poNo, []);
+      }
+      itemsByPoNo.get(item.poNo)!.push(item);
+    }
+
+    return pos.map((po) => {
+      const poItems = itemsByPoNo.get(po.poNo) || [];
+      const enrichedItems = poItems.map((item) => ({
+        ...item,
+        remainingQty: item.orderQty - item.receivedQty,
+        itemCode: partMap.get(item.itemCode)?.itemCode ?? item.itemCode,
+        itemName: partMap.get(item.itemCode)?.itemName,
+        unit: partMap.get(item.itemCode)?.unit,
+      }));
+
+      return {
+        ...po,
+        items: enrichedItems,
+        totalOrderQty: poItems.reduce((sum, i) => sum + i.orderQty, 0),
+        totalReceivedQty: poItems.reduce((sum, i) => sum + i.receivedQty, 0),
+        totalRemainingQty: poItems.reduce((sum, i) => sum + (i.orderQty - i.receivedQty), 0),
+      };
+    });
+  }
+
+  /** 특정 PO의 입하 가능 품목 조회 */
+  async getPoItems(poNo: string, company?: string, plant?: string) {
+    const po = await this.purchaseOrderRepository.findOne({
+      where: { poNo, ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+    });
+
+    if (!po) throw new NotFoundException(`PO를 찾을 수 없습니다: ${poNo}`);
+
+    const items = await this.purchaseOrderItemRepository.find({
+      where: { poNo, ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+    });
+
+    const itemCodes = items.map((item: PurchaseOrderItem) => item.itemCode).filter(Boolean);
+    const parts = itemCodes.length > 0
+      ? await this.partMasterRepository.find({
+        where: { itemCode: In(itemCodes), ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+      })
+      : [];
+    const partMap = new Map(parts.map((p: PartMaster) => [p.itemCode, p]));
+
+    return {
+      ...po,
+      items: items
+        .map((item: PurchaseOrderItem) => ({
+          ...item,
+          remainingQty: item.orderQty - item.receivedQty,
+          itemCode: partMap.get(item.itemCode)?.itemCode ?? item.itemCode,
+          itemName: partMap.get(item.itemCode)?.itemName,
+          unit: partMap.get(item.itemCode)?.unit,
+        }))
+        .filter((item) => item.remainingQty > 0),
+    };
+  }
+
+  /** PO 기반 입하 등록 (핵심 트랜잭션) */
+  async createPoArrival(dto: CreatePoArrivalDto, company?: string, plant?: string) {
+    const po = await this.purchaseOrderRepository.findOne({
+      where: { poNo: dto.poId, ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+    });
+    if (!po) throw new NotFoundException(`PO를 찾을 수 없습니다: ${dto.poId}`);
+    this.assertSameTenant('PO', { company, plant }, po);
+    if (!['CONFIRMED', 'PARTIAL'].includes(po.status)) {
+      throw new BadRequestException(`입하 불가 상태입니다: ${po.status}`);
+    }
+
+    const poItems = await this.purchaseOrderItemRepository.find({
+      where: { poNo: dto.poId, ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+    });
+    poItems.forEach((poItem) => this.assertSameTenant('PO 품목', { company: po.company, plant: po.plant }, poItem));
+
+    // 잔량 검증 — poItemId는 "poNo-seq" 형식 또는 seq 번호
+    // G2: 입하잔량 = 발주수량 - 입하합계 + 반품합계 (반품 시 잔량 복원)
+    // 해당 PO 품목코드만 필터링하여 전체 스캔 방지
+    const poItemCodes = [...new Set(poItems.map((pi) => pi.itemCode).filter(Boolean))];
+    const returnTxs = poItemCodes.length > 0
+      ? await this.stockTransactionRepository.find({
+          where: {
+            refType: 'RETURN',
+            transType: 'MAT_IN_CANCEL',
+            itemCode: In(poItemCodes),
+            ...(company ? { company } : {}),
+            ...(plant ? { plant } : {}),
+          },
+        })
+      : [];
+    // PO품목/반품 Map 전처리 (O(n*m) → O(n) 개선)
+    const poItemBySeq = new Map(poItems.map((pi) => [pi.seq, pi]));
+    const poItemByKey = new Map(poItems.map((pi) => [`${pi.poNo}-${pi.seq}`, pi]));
+    const returnQtyMap = new Map<string, number>();
+    for (const tx of returnTxs) {
+      const key = `${tx.itemCode}::${tx.refId}`;
+      returnQtyMap.set(key, (returnQtyMap.get(key) ?? 0) + Math.abs(tx.qty));
+    }
+
+    for (const item of dto.items) {
+      const poItem = poItemBySeq.get(Number(item.poItemId)) ?? poItemByKey.get(item.poItemId);
+      if (!poItem) throw new BadRequestException(`PO 품목을 찾을 수 없습니다: ${item.poItemId}`);
+      const returnQty = returnQtyMap.get(`${poItem.itemCode}::${String(poItem.seq)}`) ?? 0;
+      const remaining = poItem.orderQty - poItem.receivedQty + returnQty;
+      if (item.receivedQty > remaining) {
+        throw new BadRequestException(
+          `입하수량(${item.receivedQty})이 잔량(${remaining})을 초과합니다. (발주: ${poItem.orderQty}, 입하합계: ${poItem.receivedQty}, 반품합계: ${returnQty})`,
+        );
+      }
+    }
+
+    // 품목/창고 일괄 선조회 (트랜잭션 밖, N+1 제거)
+    const itemCodes = [...new Set(dto.items.map((i) => i.itemCode).filter(Boolean))];
+    const whCodes = [...new Set(dto.items.map((i) => i.warehouseId).filter(Boolean))];
+    const tenantWhere = {
+      ...(company ? { company } : {}),
+      ...(plant ? { plant } : {}),
+    };
+    const allParts = itemCodes.length > 0
+      ? await this.partMasterRepository.find({ where: { itemCode: In(itemCodes), ...tenantWhere } })
+      : [];
+    const allWarehouses = whCodes.length > 0
+      ? await this.warehouseRepository.find({ where: { warehouseCode: In(whCodes), ...tenantWhere } })
+      : [];
+    const partMap = new Map(allParts.map((p) => [p.itemCode, p] as const));
+    const whMap = new Map(allWarehouses.map((w) => [w.warehouseCode, w] as const));
+
+    return this.tx.run(async (queryRunner) => {
+      const results = [];
+      const arrivalNo = await this.numbering.nextInTx(queryRunner, 'ARRIVAL');
+      let arrivalSeq = 1;
+
+      for (const item of dto.items) {
+        const transNo = await this.numbering.nextInTx(queryRunner, 'STOCK_TX');
+
+        const part = partMap.get(item.itemCode);
+
+        // 1. MatArrival 생성 (입하 업무 테이블) — LOT은 라벨 발행 시 생성됨
+        const arrival = queryRunner.manager.create(MatArrival, {
+          arrivalNo,
+          seq: arrivalSeq++,
+          invoiceNo: dto.invoiceNo,
+          poId: dto.poId,
+          poItemId: item.poItemId,
+          poNo: po.poNo,
+          vendorId: po.partnerId,
+          vendorName: po.partnerName,
+          supUid: item.supUid || null,
+          itemCode: item.itemCode,
+          qty: item.receivedQty,
+          warehouseCode: item.warehouseId,
+          arrivalType: 'PO',
+          workerId: dto.workerId,
+          remark: item.remark || dto.remark,
+          iqcStatus: 'PENDING',
+          status: 'DONE',
+          company: po.company,
+          plant: po.plant,
+        });
+        await queryRunner.manager.save(arrival);
+
+        // 2. StockTransaction 생성 (수불원장)
+        const stockTx = queryRunner.manager.create(StockTransaction, {
+          transNo,
+          transType: 'MAT_IN',
+          toWarehouseId: item.warehouseId,
+          itemCode: item.itemCode,
+          qty: item.receivedQty,
+          remark: item.remark || dto.remark,
+          workerId: dto.workerId,
+          refType: 'PO',
+          refId: item.poItemId,
+          company: po.company,
+          plant: po.plant,
+        });
+        const savedTx = await queryRunner.manager.save(stockTx);
+
+        // 3. Stock upsert (현재고 반영)
+        await this.upsertStock(queryRunner.manager, item.warehouseId, item.itemCode, null, item.receivedQty, po.company, po.plant);
+
+        // 4. PurchaseOrderItem.receivedQty 증가
+        const poItem = poItems.find((pi) => pi.seq === Number(item.poItemId) || `${pi.poNo}-${pi.seq}` === item.poItemId);
+        if (poItem) {
+          await queryRunner.manager.update(PurchaseOrderItem, {
+            poNo: poItem.poNo,
+            seq: poItem.seq,
+            ...(po.company ? { company: po.company } : {}),
+            ...(po.plant ? { plant: po.plant } : {}),
+          }, {
+            receivedQty: poItem.receivedQty + item.receivedQty,
+          });
+        }
+
+        const warehouse = whMap.get(item.warehouseId);
+
+        results.push({
+          ...savedTx,
+          arrivalNo,
+          itemCode: item.itemCode,
+          itemName: part?.itemName ?? null,
+          itemType: part?.itemType ?? null,
+          unit: part?.unit ?? null,
+          warehouseCode: item.warehouseId,
+          warehouseName: warehouse?.warehouseName ?? null,
+        });
+      }
+
+      // 5. PO 상태 재계산
+      await this.updatePOStatus(queryRunner.manager, po.poNo, po.company, po.plant);
+
+      return results;
+    });
+  }
+
+  /** 수동 입하 등록 */
+  async createManualArrival(dto: CreateManualArrivalDto, company?: string, plant?: string) {
+    return this.tx.run(async (queryRunner) => {
+      const tenantWhere = {
+        ...(company ? { company } : {}),
+        ...(plant ? { plant } : {}),
+      };
+      const arrivalNo = await this.numbering.nextInTx(queryRunner, 'ARRIVAL');
+      const transNo = await this.numbering.nextInTx(queryRunner, 'STOCK_TX');
+
+      // 품목 정보 조회
+      const part = await this.partMasterRepository.findOne({ where: { itemCode: dto.itemCode, ...tenantWhere } });
+
+      // 1. MatArrival 생성 (입하 업무 테이블) — LOT은 라벨 발행 시 생성됨
+      const arrival = queryRunner.manager.create(MatArrival, {
+        arrivalNo,
+        seq: 1,
+        invoiceNo: dto.invoiceNo,
+        vendorId: dto.vendorId,
+        vendorName: dto.vendor,
+        supUid: dto.supUid || null,
+        itemCode: dto.itemCode,
+        qty: dto.qty,
+        warehouseCode: dto.warehouseId,
+        arrivalType: 'MANUAL',
+        workerId: dto.workerId,
+        remark: dto.remark,
+        iqcStatus: 'PENDING',
+        status: 'DONE',
+        company,
+        plant,
+      });
+      await queryRunner.manager.save(arrival);
+
+      // 2. StockTransaction 생성 (수불원장)
+      const stockTx = queryRunner.manager.create(StockTransaction, {
+        transNo,
+        transType: 'MAT_IN',
+        toWarehouseId: dto.warehouseId,
+        itemCode: dto.itemCode,
+        qty: dto.qty,
+        remark: dto.remark,
+        workerId: dto.workerId,
+        refType: 'MANUAL',
+        company,
+        plant,
+      });
+      const savedTx = await queryRunner.manager.save(stockTx);
+
+      // 3. Stock upsert
+      await this.upsertStock(queryRunner.manager, dto.warehouseId, dto.itemCode, null, dto.qty, company, plant);
+
+      // warehouse 정보 조회 (part는 이미 위에서 조회)
+      const warehouse = await this.warehouseRepository.findOne({
+        where: { warehouseCode: dto.warehouseId, ...tenantWhere },
+      });
+
+      return {
+        ...savedTx,
+        arrivalNo,
+        itemCode: dto.itemCode,
+        itemName: part?.itemName ?? null,
+        itemType: part?.itemType ?? null,
+        unit: part?.unit ?? null,
+        warehouseCode: dto.warehouseId,
+        warehouseName: warehouse?.warehouseName ?? null,
+      };
+    });
+  }
+
+  /** 입하 이력 조회 (MAT_IN + MAT_IN_CANCEL) */
+  async findAll(query: ArrivalQueryDto, company?: string, plant?: string) {
+    const { page = 1, limit = 10, search, fromDate, toDate, status } = query;
+    const skip = (page - 1) * limit;
+
+    const queryBuilder = this.stockTransactionRepository.createQueryBuilder('tx')
+      .where('tx.transType IN (:...transTypes)', { transTypes: ['MAT_IN', 'MAT_IN_CANCEL'] });
+
+    if (company) queryBuilder.andWhere('tx.company = :company', { company });
+    if (plant) queryBuilder.andWhere('tx.plant = :plant', { plant });
+
+    if (status) {
+      queryBuilder.andWhere('tx.status = :status', { status });
+    }
+
+    if (fromDate && toDate) {
+      queryBuilder.andWhere('tx.transDate BETWEEN :fromDate AND :toDate', {
+        fromDate: new Date(fromDate),
+        toDate: new Date(toDate),
+      });
+    } else if (fromDate) {
+      queryBuilder.andWhere('tx.transDate >= :fromDate', { fromDate: new Date(fromDate) });
+    } else if (toDate) {
+      queryBuilder.andWhere('tx.transDate <= :toDate', { toDate: new Date(toDate) });
+    }
+
+    if (search) {
+      queryBuilder.andWhere(
+        '(tx.transNo LIKE :search OR tx.itemCode IN (SELECT item_code FROM item_masters WHERE item_code LIKE :search OR part_name LIKE :search))',
+        { search: `%${search}%` },
+      );
+    }
+
+    const [data, total] = await Promise.all([
+      queryBuilder
+        .orderBy('tx.transDate', 'DESC')
+        .skip(skip)
+        .take(limit)
+        .getMany(),
+      queryBuilder.getCount(),
+    ]);
+
+    // part, lot, warehouse 정보 조회
+    const itemCodes = data.map((item) => item.itemCode).filter(Boolean);
+    const matUids = data.map((item) => item.matUid).filter(Boolean) as string[];
+    const warehouseIds = data.map((item) => item.toWarehouseId).filter(Boolean) as string[];
+    const tenantWhere = {
+      ...(company ? { company } : {}),
+      ...(plant ? { plant } : {}),
+    };
+
+    const [parts, lots, warehouses] = await Promise.all([
+      itemCodes.length > 0 ? this.partMasterRepository.find({ where: { itemCode: In(itemCodes), ...tenantWhere } }) : Promise.resolve([]),
+      matUids.length > 0 ? this.matLotRepository.find({ where: { matUid: In(matUids), ...tenantWhere } }) : Promise.resolve([]),
+      warehouseIds.length > 0 ? this.warehouseRepository.find({ where: { warehouseCode: In(warehouseIds), ...tenantWhere } }) : Promise.resolve([]),
+    ]);
+
+    const partMap = new Map(parts.map((p) => [p.itemCode, p]));
+    const lotMap = new Map(lots.map((l) => [l.matUid, l]));
+    const warehouseMap = new Map(warehouses.map((w) => [w.warehouseCode, w]));
+
+    // MatArrival 정보 조회 (인보이스번호, 거래처 등) — arrivalNo 기준으로 조회
+    // NOTE: MatArrival에는 matUid 필드가 없음. itemCode 기준으로 매칭
+    const arrivalRecords = itemCodes.length > 0
+      ? await this.matArrivalRepository.find({ where: { itemCode: In(itemCodes), status: 'DONE', ...tenantWhere } })
+      : [];
+    const arrivalByItemCode = new Map(arrivalRecords.map((a) => [a.itemCode, a]));
+
+    const flattenedData = data.map((item) => {
+      const part = partMap.get(item.itemCode);
+      const lot = item.matUid ? lotMap.get(item.matUid) : null;
+      const warehouse = item.toWarehouseId ? warehouseMap.get(item.toWarehouseId) : null;
+      const arrival = item.itemCode ? arrivalByItemCode.get(item.itemCode) : null;
+
+      return {
+        ...item,
+        // flat 필드 (하위 호환)
+        itemCode: part?.itemCode ?? item.itemCode,
+        itemName: part?.itemName ?? null,
+        itemType: part?.itemType ?? null,
+        unit: part?.unit ?? null,
+        warehouseCode: item.toWarehouseId,
+        warehouseName: warehouse?.warehouseName ?? null,
+        arrivalNo: arrival?.arrivalNo,
+        invoiceNo: arrival?.invoiceNo,
+        vendorId: arrival?.vendorId,
+        vendorName: arrival?.vendorName,
+        arrivalType: arrival?.arrivalType,
+        // 중첩 객체 (프론트엔드 타입 호환)
+        part: part ? { itemCode: part.itemCode, itemName: part.itemName, unit: part.unit } : null,
+        lot: lot ? { matUid: lot.matUid, poNo: lot.poNo, vendor: lot.vendor } : null,
+        toWarehouse: warehouse ? { warehouseCode: warehouse.warehouseCode, warehouseName: warehouse.warehouseName } : null,
+      };
+    });
+
+    return { data: flattenedData, total, page, limit };
+  }
+
+  /** 입하 취소 (역분개 트랜잭션) */
+  async cancel(dto: CancelArrivalDto, company?: string, plant?: string) {
+    const original = await this.stockTransactionRepository.findOne({
+      where: { transNo: dto.transactionId, ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+    });
+
+    if (!original) throw new NotFoundException(`트랜잭션을 찾을 수 없습니다: ${dto.transactionId}`);
+    if (original.status === 'CANCELED') throw new BadRequestException('이미 취소된 트랜잭션입니다.');
+    if (original.transType !== 'MAT_IN') throw new BadRequestException('입하 트랜잭션만 취소할 수 있습니다.');
+    this.assertSameTenant('입하 원본 트랜잭션', { company, plant }, original);
+
+    // G3: 입하 취소 조건 제한 — IQC 판정 이후 취소 불가 (무검사품은 입고 전)
+    const tenantWhere = {
+      ...(original.company ? { company: original.company } : company ? { company } : {}),
+      ...(original.plant ? { plant: original.plant } : plant ? { plant } : {}),
+    };
+    if (original.itemCode) {
+      const iqcRecord = await this.iqcLogRepository.findOne({
+        where: { arrivalNo: original.refId ?? undefined, itemCode: original.itemCode, ...tenantWhere },
+        order: { inspectDate: 'DESC' },
+      });
+      if (iqcRecord && (iqcRecord.result === 'PASS' || iqcRecord.result === 'FAIL')) {
+        throw new BadRequestException('IQC 판정이 완료된 입하는 취소할 수 없습니다.');
+      }
+    }
+
+    await this.ensureNoDownstreamProgress(original, company, plant);
+
+    const cancelTransNo = `${original.transNo}-C`;
+
+    return this.tx.run(async (queryRunner) => {
+      // 1. 원본 CANCELED 처리
+      await queryRunner.manager.update(StockTransaction, { transNo: original.transNo, ...tenantWhere }, { status: 'CANCELED' });
+
+      // 1-1. MatArrival도 CANCELED 처리 (matUid → LOT.arrivalNo FK 기준)
+      let canceledArrival: MatArrival | null = null;
+      if (original.matUid) {
+        // matUid → MatLot.arrivalNo로 정확한 입하 건 식별
+        const lot = await queryRunner.manager.findOne(MatLot, { where: { matUid: original.matUid, ...tenantWhere } });
+        if (lot?.arrivalNo) {
+          canceledArrival = await queryRunner.manager.findOne(MatArrival, {
+            where: { arrivalNo: lot.arrivalNo, seq: lot.arrivalSeq ?? 1, ...tenantWhere },
+          });
+          await queryRunner.manager.update(MatArrival, { arrivalNo: lot.arrivalNo, seq: lot.arrivalSeq ?? 1, ...tenantWhere }, { status: 'CANCELED' });
+        }
+      } else if (original.itemCode) {
+        // matUid 없는 레거시 데이터 — 기존 로직 유지
+        const arrivalRecord = await queryRunner.manager.findOne(MatArrival, {
+          where: { itemCode: original.itemCode, status: 'DONE', ...tenantWhere },
+          order: { arrivalDate: 'DESC' },
+        });
+        if (arrivalRecord) {
+          canceledArrival = arrivalRecord;
+          await queryRunner.manager.update(MatArrival, { arrivalNo: arrivalRecord.arrivalNo, seq: arrivalRecord.seq, ...tenantWhere }, { status: 'CANCELED' });
+        }
+      }
+
+      // 2. 역분개 트랜잭션 생성
+      const cancelTx = queryRunner.manager.create(StockTransaction, {
+        transNo: cancelTransNo,
+        transType: 'MAT_IN_CANCEL',
+        fromWarehouseId: original.toWarehouseId,
+        itemCode: original.itemCode,
+        matUid: original.matUid,
+        qty: -original.qty,
+        remark: dto.reason,
+        workerId: dto.workerId,
+        cancelRefId: original.transNo,
+        refType: 'CANCEL',
+        company: original.company,
+        plant: original.plant,
+      });
+      const savedCancelTx = await queryRunner.manager.save(cancelTx);
+
+      // 3. Stock 감소
+      if (original.toWarehouseId) {
+        await this.upsertStock(
+          queryRunner.manager, original.toWarehouseId, original.itemCode, original.matUid, -original.qty, original.company, original.plant,
+        );
+      }
+
+      // NOTE: MatLot.currentQty 제거됨 — 재고수량은 MatStock에서만 관리
+
+      // 5. PO receivedQty 감소 + PO status 재계산
+      if (original.refType === 'PO' && original.refId) {
+        const poItemId = canceledArrival?.poItemId ?? original.refId;
+        const refSeq = Number(poItemId);
+        const poNoFromComposite = String(poItemId).match(/^(.+)-(\d+)$/);
+        const poNo = canceledArrival?.poNo ?? canceledArrival?.poId ?? poNoFromComposite?.[1];
+        const poSeq = !isNaN(refSeq) ? refSeq : poNoFromComposite ? Number(poNoFromComposite[2]) : NaN;
+        const poItem = poNo && !isNaN(poSeq)
+          ? await queryRunner.manager.findOne(PurchaseOrderItem, { where: { poNo, seq: poSeq, ...tenantWhere } })
+          : null;
+        if (poItem) {
+          await queryRunner.manager.update(PurchaseOrderItem, { poNo: poItem.poNo, seq: poItem.seq, ...tenantWhere }, {
+            receivedQty: Math.max(0, poItem.receivedQty - original.qty),
+          });
+          await this.updatePOStatus(queryRunner.manager, poItem.poNo, original.company, original.plant);
+        }
+      }
+
+      // part, lot, warehouse 정보 조회
+      const [part, lot, toWarehouse] = await Promise.all([
+        this.partMasterRepository.findOne({ where: { itemCode: original.itemCode, ...tenantWhere } }),
+        original.matUid
+          ? this.matLotRepository.findOne({
+              where: { matUid: original.matUid, ...tenantWhere },
+            })
+          : null,
+        original.toWarehouseId
+          ? this.warehouseRepository.findOne({
+              where: { warehouseCode: original.toWarehouseId, ...tenantWhere },
+            })
+          : null,
+      ]);
+
+      return {
+        ...savedCancelTx,
+        itemCode: original.itemCode,
+        itemName: part?.itemName ?? null,
+        itemType: part?.itemType ?? null,
+        unit: part?.unit ?? null,
+        matUid: original.matUid,
+        warehouseCode: original.toWarehouseId,
+        warehouseName: toWarehouse?.warehouseName ?? null,
+      };
+    });
+  }
+
+  private async ensureNoDownstreamProgress(original: StockTransaction, company?: string, plant?: string) {
+    if (!original.matUid) {
+      return;
+    }
+
+    const matIssueRepo = this.dataSource.getRepository(MatIssue);
+    const prodResultRepo = this.dataSource.getRepository(ProdResult);
+    const fgLabelRepo = this.dataSource.getRepository(FgLabel);
+
+    const latestIssue = await matIssueRepo.findOne({
+      where: { matUid: original.matUid, status: 'DONE', ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+      order: { issueDate: 'DESC' },
+    });
+
+    if (!latestIssue) {
+      return;
+    }
+
+    const blockers = [`자재출고=${latestIssue.issueNo}-${latestIssue.seq}`];
+
+    let prodResult: ProdResult | null = null;
+    if (latestIssue.prodResultNo) {
+      prodResult = await prodResultRepo.findOne({
+        where: { resultNo: latestIssue.prodResultNo, ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+      });
+    } else if (latestIssue.orderNo) {
+      prodResult = await prodResultRepo.findOne({
+        where: {
+          orderNo: latestIssue.orderNo,
+          status: In(['RUNNING', 'DONE']),
+          ...(company ? { company } : {}),
+          ...(plant ? { plant } : {}),
+        },
+        order: { createdAt: 'DESC' },
+      });
+    }
+
+    if (prodResult && prodResult.status !== 'CANCELED') {
+      blockers.push(`생산실적=${prodResult.resultNo}(${prodResult.status})`);
+
+      if (prodResult.prdUid) {
+        const fgLabel = await fgLabelRepo.findOne({
+          where: { fgBarcode: prodResult.prdUid },
+        });
+        if (fgLabel) {
+          blockers.push(`FG=${fgLabel.fgBarcode}(${fgLabel.status})`);
+        }
+      }
+    }
+
+    throw new BadRequestException(
+      `입하 ${original.transNo} 는 뒤 공정이 이미 진행되어 취소할 수 없습니다. ` +
+        `현재 상태: ${blockers.join(', ')}. ` +
+        `출하 -> 팔레트 -> 박스/OQC -> FG 라벨 -> 생산실적 -> 자재출고 순서로 역처리 후 다시 입하를 취소해 주세요.`,
+    );
+  }
+
+  /** 오늘 입하 통계 */
+  async getStats(company?: string, plant?: string) {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date();
+    todayEnd.setHours(23, 59, 59, 999);
+
+    const [todayCount, todayQtyResult, unrecevedPoCount, totalCount] = await Promise.all([
+      this.stockTransactionRepository.count({
+        where: {
+          transType: 'MAT_IN',
+          status: 'DONE',
+          transDate: Between(todayStart, todayEnd),
+          ...(company ? { company } : {}),
+          ...(plant ? { plant } : {}),
+        },
+      }),
+      this.stockTransactionRepository
+        .createQueryBuilder('tx')
+        .select('SUM(tx.qty)', 'sumQty')
+        .where('tx.transType = :transType', { transType: 'MAT_IN' })
+        .andWhere('tx.status = :status', { status: 'DONE' })
+        .andWhere('tx.transDate BETWEEN :start AND :end', { start: todayStart, end: todayEnd })
+        .andWhere(company ? 'tx.company = :company' : '1=1', { company })
+        .andWhere(plant ? 'tx.plant = :plant' : '1=1', { plant })
+        .getRawOne(),
+      this.purchaseOrderRepository.count({
+        where: { status: In(['CONFIRMED', 'PARTIAL']), ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+      }),
+      this.stockTransactionRepository.count({
+        where: { transType: 'MAT_IN', ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+      }),
+    ]);
+
+    return {
+      todayCount,
+      todayQty: parseInt(todayQtyResult?.sumQty) || 0,
+      unrecevedPoCount,
+      totalCount,
+    };
+  }
+
+  /** 입하재고현황 조회 (MAT_ARRIVALS 기반 + 현재고 조인) */
+  async getArrivalStockStatus(query: ArrivalStockQueryDto, company?: string, plant?: string) {
+    const { search, fromDate, toDate } = query;
+
+    const qb = this.matArrivalRepository.createQueryBuilder('a')
+      .where('a.status = :status', { status: 'DONE' });
+    if (company) qb.andWhere('a.company = :company', { company });
+    if (plant) qb.andWhere('a.plant = :plant', { plant });
+
+    if (fromDate && toDate) {
+      qb.andWhere('a.arrivalDate BETWEEN :fromDate AND :toDate', {
+        fromDate: new Date(fromDate),
+        toDate: new Date(toDate + 'T23:59:59'),
+      });
+    } else if (fromDate) {
+      qb.andWhere('a.arrivalDate >= :fromDate', { fromDate: new Date(fromDate) });
+    } else if (toDate) {
+      qb.andWhere('a.arrivalDate <= :toDate', { toDate: new Date(toDate + 'T23:59:59') });
+    }
+
+    const arrivals = await qb.orderBy('a.arrivalDate', 'DESC').getMany();
+
+    if (arrivals.length === 0) {
+      return {
+        data: [],
+        stats: { totalArrivalQty: 0, totalCurrentStock: 0, partCount: 0, lotCount: 0 },
+      };
+    }
+
+    // 관련 ID 수집 (MatArrival에는 matUid 없음 — itemCode 기준으로 조회)
+    const itemCodes = [...new Set(arrivals.map((a) => a.itemCode))];
+    const warehouseCodes = [...new Set(arrivals.map((a) => a.warehouseCode))];
+    const tenantWhere = {
+      ...(company ? { company } : {}),
+      ...(plant ? { plant } : {}),
+    };
+
+    // 병렬 조회
+    const [parts, warehouses, stocks] = await Promise.all([
+      this.partMasterRepository.find({ where: { itemCode: In(itemCodes), ...tenantWhere } }),
+      this.warehouseRepository.find({ where: { warehouseCode: In(warehouseCodes), ...tenantWhere } }),
+      this.matStockRepository.find({
+        where: {
+          itemCode: In(itemCodes),
+          warehouseCode: In(warehouseCodes),
+          ...tenantWhere,
+        },
+      }),
+    ]);
+
+    const partMap = new Map(parts.map((p) => [p.itemCode, p]));
+    const warehouseMap = new Map(warehouses.map((w) => [w.warehouseCode, w]));
+
+    // Stock 맵: warehouseCode_itemCode → qty
+    const stockMap = new Map<string, number>();
+    for (const s of stocks) {
+      const key = `${s.warehouseCode}_${s.itemCode}`;
+      stockMap.set(key, (stockMap.get(key) || 0) + s.qty);
+    }
+
+    let data = arrivals.map((a) => {
+      const part = partMap.get(a.itemCode);
+      const warehouse = warehouseMap.get(a.warehouseCode);
+      const stockKey = `${a.warehouseCode}_${a.itemCode}`;
+      const currentStock = stockMap.get(stockKey) ?? 0;
+
+      return {
+        arrivalNo: a.arrivalNo,
+        seq: a.seq,
+        invoiceNo: a.invoiceNo,
+        poNo: a.poNo,
+        vendorName: a.vendorName,
+        itemCode: a.itemCode,
+        itemName: part?.itemName ?? null,
+        unit: part?.unit ?? null,
+        arrivalQty: a.qty,
+        currentStock,
+        warehouseName: warehouse?.warehouseName || a.warehouseCode,
+        arrivalType: a.arrivalType,
+        arrivalDate: a.arrivalDate,
+      };
+    });
+
+    // 검색 필터 (메모리 필터링)
+    if (search) {
+      const s = search.toLowerCase();
+      data = data.filter((d) =>
+        (d.itemCode && d.itemCode.toLowerCase().includes(s)) ||
+        (d.itemName && d.itemName.toLowerCase().includes(s)) ||
+        (d.poNo && d.poNo.toLowerCase().includes(s)) ||
+        (d.invoiceNo && d.invoiceNo.toLowerCase().includes(s)) ||
+        (d.arrivalNo && d.arrivalNo.toLowerCase().includes(s)),
+      );
+    }
+
+    // 통계
+    const stats = {
+      totalArrivalQty: data.reduce((sum, d) => sum + d.arrivalQty, 0),
+      totalCurrentStock: data.reduce((sum, d) => sum + d.currentStock, 0),
+      partCount: new Set(data.map((d) => d.itemCode)).size,
+      lotCount: 0,
+    };
+
+    return { data, stats };
+  }
+
+  /**
+   * 바코드로 입하 정보 조회
+   *
+   * 1차: MAT_ARRIVALS 테이블에서 ARRIVAL_NO 또는 PO_NO로 바코드 직접 조회
+   * 2차 (1차 실패): VENDOR_BARCODE_MAPPINGS에서 ITEM_CODE 매핑 후 최신 입하 조회
+   * IQC 상태는 iqcYn='N'이면 NONE, 'Y'이면 IQC_LOGS 최신 결과로 결정
+   */
+  async findByBarcode(barcode: string, company?: string, plant?: string) {
+    // 1차 시도: arrivalNo 또는 poNo로 직접 조회
+    let arrival: MatArrival | null = await this.matArrivalRepository.findOne({
+      where: { arrivalNo: barcode, status: 'DONE', ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+      order: { arrivalDate: 'DESC' },
+    });
+
+    if (!arrival) {
+      arrival = await this.matArrivalRepository.findOne({
+        where: { poNo: barcode, status: 'DONE', ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+        order: { arrivalDate: 'DESC' },
+      });
+    }
+
+    // 2차 시도: VendorBarcodeMapping에서 itemCode 매핑
+    if (!arrival) {
+      const mapping = await this.vendorBarcodeMappingRepository.findOne({
+        where: { vendorBarcode: barcode, useYn: 'Y', ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+      });
+
+      if (mapping) {
+        arrival = await this.matArrivalRepository.findOne({
+          where: { itemCode: mapping.itemCode, status: 'DONE', ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+          order: { arrivalDate: 'DESC' },
+        });
+      }
+    }
+
+    if (!arrival) {
+      throw new NotFoundException(`바코드에 해당하는 입하 정보를 찾을 수 없습니다: ${barcode}`);
+    }
+
+    // 품목 정보 조회
+    const part = await this.partMasterRepository.findOne({
+      where: { itemCode: arrival.itemCode, ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+    });
+
+    const iqcYn = part?.iqcYn ?? 'Y';
+
+    // IQC 상태 결정
+    let iqcStatus: 'PASS' | 'FAIL' | 'IN_PROGRESS' | 'NONE' = 'NONE';
+
+    if (iqcYn === 'Y') {
+      // IQC_LOGS에서 해당 입하번호의 최신 검사 결과 조회
+      const latestIqcLog = await this.iqcLogRepository.findOne({
+        where: { arrivalNo: arrival.arrivalNo },
+        order: { inspectDate: 'DESC' },
+      });
+
+      if (!latestIqcLog) {
+        iqcStatus = 'IN_PROGRESS'; // IQC 대상이지만 아직 검사 미완
+      } else if (latestIqcLog.result === 'PASS') {
+        iqcStatus = 'PASS';
+      } else if (latestIqcLog.result === 'FAIL') {
+        iqcStatus = 'FAIL';
+      } else {
+        iqcStatus = 'IN_PROGRESS';
+      }
+    }
+
+    // PO 기반 입하의 경우 발주수량 조회
+    let orderQty = 0;
+    if (arrival.poId && arrival.poItemId) {
+      // poItemId는 seq 번호 또는 "poNo-seq" 형식
+      const poItemSeq = Number(arrival.poItemId);
+      const poItem = !isNaN(poItemSeq)
+        ? await this.purchaseOrderItemRepository.findOne({
+            where: { poNo: arrival.poNo || arrival.poId, seq: poItemSeq, ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+          })
+        : null;
+      if (poItem) {
+        orderQty = poItem.orderQty;
+      }
+    }
+
+    return {
+      arrivalNo: arrival.arrivalNo,
+      poNo: arrival.poNo ?? '',
+      itemCode: arrival.itemCode,
+      itemName: part?.itemName ?? '',
+      orderQty,
+      receivedQty: arrival.qty,
+      unit: part?.unit ?? '',
+      supplier: arrival.vendorName,
+      iqcYn,
+      iqcStatus,
+    };
+  }
+
+  /** PO 상태 재계산 */
+  private async updatePOStatus(manager: EntityManager, poNo: string, company?: string | null, plant?: string | null) {
+    const tenantWhere = {
+      ...(company ? { company } : {}),
+      ...(plant ? { plant } : {}),
+    };
+    const poItems = await manager.find(PurchaseOrderItem, {
+      where: { poNo, ...tenantWhere },
+    });
+
+    const allReceived = poItems.every(
+      (item: PurchaseOrderItem) => item.receivedQty >= item.orderQty,
+    );
+    const someReceived = poItems.some(
+      (item: PurchaseOrderItem) => item.receivedQty > 0,
+    );
+
+    let newStatus: string;
+    if (allReceived) {
+      newStatus = 'RECEIVED';
+    } else if (someReceived) {
+      newStatus = 'PARTIAL';
+    } else {
+      newStatus = 'CONFIRMED';
+    }
+
+    await manager.update(PurchaseOrder, { poNo, ...tenantWhere }, { status: newStatus });
+  }
+
+  /** MatStock upsert (현재고 증감) */
+  private async upsertStock(manager: EntityManager, warehouseCode: string, itemCode: string, matUid: string | null, qtyDelta: number, company?: string, plant?: string) {
+    const resolvedMatUid = matUid || '*';
+    const existing = await manager.findOne(MatStock, {
+      where: { warehouseCode, itemCode, matUid: resolvedMatUid, ...(company ? { company } : {}), ...(plant ? { plant } : {}) },
+    });
+
+    if (existing) {
+      const newQty = Math.max(0, existing.qty + qtyDelta);
+      await manager.update(MatStock,
+        {
+          warehouseCode: existing.warehouseCode,
+          itemCode: existing.itemCode,
+          matUid: existing.matUid,
+          ...(company ? { company } : {}),
+          ...(plant ? { plant } : {}),
+        },
+        { qty: newQty, availableQty: Math.max(0, newQty - existing.reservedQty) },
+      );
+    } else if (qtyDelta > 0) {
+      const newStock = manager.create(MatStock, {
+        warehouseCode,
+        itemCode,
+        matUid: resolvedMatUid,
+        qty: qtyDelta,
+        availableQty: qtyDelta,
+        company,
+        plant,
+      });
+      await manager.save(newStock);
+    }
+  }
+}

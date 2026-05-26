@@ -1,0 +1,86 @@
+/**
+ * @file src/entities/mat-lot.entity.ts
+ * @description 원자재 LOT 엔티티 - LOT 단위 추적/관리
+ *
+ * 초보자 가이드:
+ * - matUid가 PK (자재시리얼) - 자재 고유식별자로 직접 식별
+ * - itemCode로 품목마스터(ITEM_MASTERS)와 연결
+ * - iqcStatus: IQC 검사 상태 (PENDING/PASS/FAIL)
+ * - status: LOT 상태 (NORMAL/HOLD/SCRAPPED)
+ */
+import {
+  Entity,
+  PrimaryColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  Index,
+} from 'typeorm';
+
+@Entity({ name: 'MAT_LOTS' })
+@Index(['itemCode'])
+@Index(['status'])
+@Index(['iqcStatus'])
+@Index(['arrivalNo'])
+export class MatLot {
+  @PrimaryColumn({ name: 'MAT_UID', length: 50 })
+  matUid: string;
+
+  @Column({ name: 'ITEM_CODE', length: 50 })
+  itemCode: string;
+
+  /** 입고 시 발행된 원수량 (수불로 변하지 않는 불변값) */
+  @Column({ name: 'INIT_QTY', type: 'int' })
+  initQty: number;
+
+  @Column({ name: 'RECV_DATE', type: 'date', nullable: true })
+  recvDate: Date | null;
+
+  @Column({ name: 'MANUFACTURE_DATE', type: 'date', nullable: true })
+  manufactureDate: Date | null;
+
+  @Column({ name: 'EXPIRE_DATE', type: 'date', nullable: true })
+  expireDate: Date | null;
+
+  @Column({ type: 'varchar2', name: 'ARRIVAL_NO', length: 50, nullable: true })
+  arrivalNo: string | null;
+
+  @Column({ type: 'number', name: 'ARRIVAL_SEQ', nullable: true })
+  arrivalSeq: number | null;
+
+  @Column({ type: 'varchar2', name: 'ORIGIN', length: 50, nullable: true })
+  origin: string | null;
+
+  @Column({ name: 'VENDOR', length: 50 })
+  vendor: string;
+
+  @Column({ name: 'INVOICE_NO', length: 50 })
+  invoiceNo: string;
+
+  @Column({ type: 'varchar2', name: 'PO_NO', length: 50, nullable: true })
+  poNo: string | null;
+
+  @Column({ name: 'IQC_STATUS', length: 20, default: 'PENDING' })
+  iqcStatus: string;
+
+  @Column({ name: 'STATUS', length: 20, default: 'NORMAL' })
+  status: string;
+
+  @Column({ type: 'varchar2', name: 'COMPANY', length: 50, nullable: true })
+  company: string | null;
+
+  @Column({ type: 'varchar2', name: 'PLANT_CD', length: 50, nullable: true })
+  plant: string | null;
+
+  @Column({ type: 'varchar2', name: 'CREATED_BY', length: 50, nullable: true })
+  createdBy: string | null;
+
+  @Column({ type: 'varchar2', name: 'UPDATED_BY', length: 50, nullable: true })
+  updatedBy: string | null;
+
+  @CreateDateColumn({ name: 'CREATED_AT', type: 'timestamp' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'UPDATED_AT', type: 'timestamp' })
+  updatedAt: Date;
+}

@@ -1,0 +1,129 @@
+/**
+ * @file src/app.module.ts
+ * @description 애플리케이션 루트 모듈
+ *
+ * 초보자 가이드:
+ * 1. **ConfigModule**: 환경변수 로드 (.env 파일)
+ * 2. **DatabaseModule**: 데이터베이스 연결 (글로벌)
+ * 3. **기능 모듈**: 각 도메인별 모듈 import
+ *
+ * 모듈 추가 시:
+ * - imports 배열에 새 모듈 추가
+ * - 기능별로 modules 폴더에 모듈 생성
+ */
+
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { DatabaseModule } from './database/database.module';
+import { OracleModule } from './common/modules/oracle.module';
+import configuration from './config/configuration';
+
+// 기능 모듈
+import { AuthModule } from './modules/auth/auth.module';
+import { UserModule } from './modules/user/user.module';
+import { MasterModule } from './modules/master/master.module';
+import { MaterialModule } from './modules/material/material.module';
+import { ProductionModule } from './modules/production/production.module';
+import { QualityModule } from './modules/quality/quality.module';
+import { EquipmentModule } from './modules/equipment/equipment.module';
+import { ShippingModule } from './modules/shipping/shipping.module';
+import { InterfaceModule } from './modules/interface/interface.module';
+import { CustomsModule } from './modules/customs/customs.module';
+import { ConsumablesModule } from './modules/consumables/consumables.module';
+import { OutsourcingModule } from './modules/outsourcing/outsourcing.module';
+import { InventoryModule } from './modules/inventory/inventory.module';
+import { SystemModule } from './modules/system/system.module';
+import { DashboardModule } from './modules/dashboard/dashboard.module';
+import { WorkflowModule } from './modules/workflow/workflow.module';
+import { RoleModule } from './modules/role/role.module';
+import { MenuCategoriesModule } from './modules/menu-categories/menu-categories.module';
+import { SharedModule } from './shared/shared.module';
+import { SchedulerModule } from './modules/scheduler/scheduler.module';
+import { GuardModule } from './common/modules/guard.module';
+
+@Module({
+  imports: [
+    // 환경변수 설정 (글로벌)
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: ['.env.local', '.env'],
+      load: [configuration],
+    }),
+
+    // 데이터베이스 (글로벌) - TypeORM + Oracle
+    DatabaseModule,
+
+    // Oracle 패키지/프로시저 호출 헬퍼 (글로벌)
+    OracleModule,
+
+    // 공통 가드 모듈 (@Global) - 기능 모듈보다 먼저 로드해야 JwtAuthGuard가 전역 적용됨
+    GuardModule,
+
+    // ===== 기능 모듈 =====
+
+    // 인증 (로그인/회원가입)
+    AuthModule,
+
+    // 사용자관리
+    UserModule,
+
+    // 기준정보 관리 (공통코드, 품목, 거래처, 공정 등)
+    MasterModule,
+
+    // 재고관리 (창고, 재고, 수불 - 공통 인프라)
+    InventoryModule,
+
+    // 자재관리 (입고, 출고, 재고, LOT 추적)
+    MaterialModule,
+
+    // 생산관리 (계획, 작업지시, 실적, 바코드)
+    ProductionModule,
+
+    // 품질관리 (수입검사, 공정검사, 출하검사)
+    QualityModule,
+
+    // 설비관리 (설비 마스터, 상태, 정비)
+    EquipmentModule,
+
+    // 출하관리 (출하지시, 실적, 배송)
+    ShippingModule,
+
+    // ERP 인터페이스 (데이터 연동)
+    InterfaceModule,
+
+    // 보세관리 (수입신고, 보세자재, 사용신고)
+    CustomsModule,
+
+    // 소모품관리 (금형, 지그, 공구)
+    ConsumablesModule,
+
+    // 외주관리 (외주발주, 출고, 입고)
+    OutsourcingModule,
+
+    // 시스템관리 (통신설정)
+    SystemModule,
+
+    // 대시보드 (KPI, 최근 생산현황)
+    DashboardModule,
+
+    // 워크플로우 (노드별 상태 요약)
+    WorkflowModule,
+
+    // 역할 관리 (RBAC 역할 정의, 메뉴 권한)
+    RoleModule,
+
+    // 메뉴 카테고리 관리 (사이드바 트리 + 카테고리 CRUD + 메뉴 배치)
+    MenuCategoriesModule,
+
+    // 공유 모듈 (NumberingService 파사드 + SeqGenerator + NumRule)
+    SharedModule,
+
+    // 스케줄러 (정기 작업 실행 + 로그 + 알림)
+    SchedulerModule,
+  ],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}

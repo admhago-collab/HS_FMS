@@ -1,0 +1,75 @@
+/**
+ * @file audit-finding.entity.ts
+ * @description 내부심사 발견사항 엔티티 — 부적합/관찰사항/개선기회
+ *
+ * 초보자 가이드:
+ * 1. AuditPlan에 연결된 개별 발견사항 기록
+ * 2. 복합 PK: auditId + findingNo (부모 FK + 발견사항 번호)
+ * 3. category: NC_MAJOR(중부적합), NC_MINOR(경부적합), OBSERVATION(관찰사항), OFI(개선기회)
+ * 4. clauseRef: IATF 16949 조항 참조 (예: "8.7.1")
+ * 5. capaId: CAPA(시정/예방조치)와 연결 가능
+ * 6. 상태: OPEN → IN_PROGRESS → CLOSED
+ */
+import {
+  Entity,
+  PrimaryColumn,
+  Column,
+  ManyToOne,
+  JoinColumn,
+  CreateDateColumn,
+  Index,
+} from 'typeorm';
+import { AuditPlan } from './audit-plan.entity';
+
+@Entity({ name: 'AUDIT_FINDINGS' })
+@Index(['capaId'])
+export class AuditFinding {
+  @PrimaryColumn({ name: 'AUDIT_ID', length: 30 })
+  auditId: string;
+
+  @ManyToOne(() => AuditPlan)
+  @JoinColumn({ name: 'AUDIT_ID', referencedColumnName: 'auditNo' })
+  audit: AuditPlan;
+
+  @PrimaryColumn({ name: 'FINDING_NO', type: 'int' })
+  findingNo: number;
+
+  @Column({ type: 'varchar2', name: 'CLAUSE_REF', length: 50, nullable: true })
+  clauseRef: string;
+
+  @Column({ name: 'CATEGORY', length: 30 })
+  category: string;
+
+  @Column({ name: 'DESCRIPTION', length: 2000 })
+  description: string;
+
+  @Column({ type: 'varchar2', name: 'EVIDENCE', length: 1000, nullable: true })
+  evidence: string;
+
+  @Column({ type: 'varchar2', name: 'CAPA_ID', length: 30, nullable: true })
+  capaId: string;
+
+  @Column({ name: 'DUE_DATE', type: 'timestamp', nullable: true })
+  dueDate: Date;
+
+  @Column({ name: 'CLOSED_AT', type: 'timestamp', nullable: true })
+  closedAt: Date;
+
+  @Column({ name: 'STATUS', length: 20, default: 'OPEN' })
+  status: string;
+
+  @Column({ type: 'varchar2', name: 'REMARK', length: 500, nullable: true })
+  remark: string;
+
+  @Column({ name: 'COMPANY', length: 50 })
+  company: string;
+
+  @Column({ name: 'PLANT', length: 20 })
+  plant: string;
+
+  @Column({ type: 'varchar2', name: 'CREATED_BY', length: 50, nullable: true })
+  createdBy: string;
+
+  @CreateDateColumn({ name: 'CREATED_AT', type: 'timestamp' })
+  createdAt: Date;
+}

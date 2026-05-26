@@ -1,0 +1,215 @@
+"use client";
+
+/**
+ * @file src/app/(authenticated)/master/partner/page.tsx
+ * @description 거래처 마스터 관리 페이지 - DB API 연동
+ *
+ * 초보자 가이드:
+ * 1. **거래처 유형**: SUPPLIER(공급상) / CUSTOMER(고객)
+ * 2. **검색/필터**: 유형별 필터 + 텍스트 검색 (API 서버측 처리)
+ * 3. **CRUD**: 추가/수정은 우측 슬라이드 패널, 삭제는 소프트삭제
+ */
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useTranslation } from "react-i18next";
+import { Plus, Edit2, Trash2, Search, RefreshCw, Building2 } from "lucide-react";
+import { Card, CardContent, Button, Input, ComCodeBadge, ConfirmModal } from "@/components/ui";
+import { ComCodeSelect, UseYnSelect } from "@/components/shared";
+import DataGrid from "@/components/data-grid/DataGrid";
+import { ColumnDef } from "@tanstack/react-table";
+import api from "@/services/api";
+import PartnerFormPanel, { type Partner } from "./components/PartnerFormPanel";
+
+type PanelMode = "create" | "edit";
+
+function PartnerPage() {
+  const { t } = useTranslation();
+  const [partners, setPartners] = useState<Partner[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [searchText, setSearchText] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [useYnFilter, setUseYnFilter] = useState("");
+
+  const [isPanelOpen, setIsPanelOpen] = useState(false);
+  const [editingPartner, setEditingPartner] = useState<Partner | null>(null);
+  const [panelMode, setPanelMode] = useState<PanelMode>("create");
+  const [panelKey, setPanelKey] = useState(0);
+  const [deleteTarget, setDeleteTarget] = useState<Partner | null>(null);
+  const panelAnimateRef = useRef(true);
+
+  /** API에서 거래처 목록 조회 */
+  const fetchPartners = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params: Record<string, string> = { limit: "5000" };
+      if (searchText) params.search = searchText;
+      if (typeFilter) params.partnerType = typeFilter;
+      if (useYnFilter) params.useYn = useYnFilter;
+      const res = await api.get("/master/partners", { params });
+      if (res.data.success) setPartners(res.data.data || []);
+    } catch {
+      setPartners([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [searchText, typeFilter, useYnFilter]);
+
+  useEffect(() => { fetchPartners(); }, [fetchPartners]);
+
+  const handleDeleteConfirm = useCallback(async () => {
+    if (!deleteTarget) return;
+    try {
+      await api.delete(`/master/partners/${deleteTarget.partnerCode}`);
+      fetchPartners();
+    } catch (e: any) {
+      console.error("Delete failed:", e);
+    } finally {
+      setDeleteTarget(null);
+    }
+  }, [deleteTarget, fetchPartners]);
+
+  const handlePanelClose = useCallback(() => {
+    setIsPanelOpen(false);
+    setEditingPartner(null);
+    setPanelMode("create");
+    panelAnimateRef.current = true;
+  }, []);
+
+  const handlePanelSave = useCallback(() => {
+    fetchPartners();
+  }, [fetchPartners]);
+
+  const openCreatePanel = useCallback(() => {
+    panelAnimateRef.current = !isPanelOpen;
+    setEditingPartner(null);
+    setPanelMode("create");
+    setPanelKey(k => k + 1);
+    setIsPanelOpen(true);
+  }, [isPanelOpen]);
+
+  const openEditPanel = useCallback((partner: Partner) => {
+    panelAnimateRef.current = !isPanelOpen;
+    setEditingPartner(partner);
+    setPanelMode("edit");
+    setPanelKey(k => k + 1);
+    setIsPanelOpen(true);
+  }, [isPanelOpen]);
+
+  const handleRowClick = useCallback((partner: Partner) => {
+    if (!isPanelOpen || panelMode !== "edit") return;
+    setEditingPartner(partner);
+    setPanelKey(k => k + 1);
+  }, [isPanelOpen, panelMode]);
+
+  const columns = useMemo<ColumnDef<Partner>[]>(() => [
+    {
+      id: "actions", header: t("common.actions"), size: 80,
+      meta: { align: "center" as const },
+      cell: ({ row }) => (
+        <div className="flex gap-1">
+          <button onClick={(e) => { e.stopPropagation(); openEditPanel(row.original); }} className="p-1 hover:bg-surface rounded">
+            <Edit2 className="w-4 h-4 text-primary" />
+          </button>
+          <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(row.original); }} className="p-1 hover:bg-surface rounded">
+            <Trash2 className="w-4 h-4 text-red-500" />
+          </button>
+        </div>
+      ),
+    },
+    { accessorKey: "partnerCode", header: t("master.partner.partnerCode"), size: 120 },
+    { accessorKey: "partnerName", header: t("master.partner.partnerName"), size: 200 },
+    {
+      accessorKey: "partnerType", header: t("master.partner.partnerType"), size: 80,
+      cell: ({ getValue }) => <ComCodeBadge groupCode="PARTNER_TYPE" code={getValue() as string} />,
+    },
+    { accessorKey: "bizNo", header: t("master.partner.bizNo"), size: 130 },
+    { accessorKey: "ceoName", header: t("master.partner.ceoName"), size: 90 },
+    { accessorKey: "tel", header: t("master.partner.tel"), size: 130 },
+    { accessorKey: "contactPerson", header: t("master.partner.contactPerson"), size: 90 },
+    { accessorKey: "email", header: t("master.partner.email"), size: 180 },
+    {
+      accessorKey: "useYn", header: t("common.useYn", "사용여부"), size: 60,
+      meta: { filterType: "multi" as const },
+      cell: ({ getValue }) => {
+        const v = getValue() as string;
+        return (
+          <span className={`px-1.5 py-0.5 text-xs rounded ${v === "Y"
+            ? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300"
+            : "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300"}`}>{v === "Y" ? "Y" : "N"}</span>
+        );
+      },
+    },
+  ], [t, openEditPanel]);
+
+  return (
+    <div className="flex h-full animate-fade-in">
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden p-6 gap-4">
+        <div className="flex justify-between items-center flex-shrink-0">
+          <div>
+            <h1 className="text-xl font-bold text-text flex items-center gap-2">
+              <Building2 className="w-7 h-7 text-primary" />{t("master.partner.title")}
+            </h1>
+            <p className="text-text-muted mt-1">{t("master.partner.subtitle")} ({partners.length}건)</p>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="secondary" size="sm" onClick={fetchPartners}>
+              <RefreshCw className={`w-4 h-4 mr-1 ${loading ? "animate-spin" : ""}`} />{t("common.refresh")}
+            </Button>
+            <Button size="sm" onClick={openCreatePanel}>
+              <Plus className="w-4 h-4 mr-1" />{t("master.partner.addPartner")}
+            </Button>
+          </div>
+        </div>
+
+        <Card className="flex-1 min-h-0 overflow-hidden" padding="none"><CardContent className="h-full p-4">
+          <DataGrid
+            data={partners}
+            columns={columns}
+            isLoading={loading}
+            enableColumnPinning
+            enableColumnFilter
+            enableExport
+            exportFileName={t("master.partner.title")}
+            onRowClick={handleRowClick}
+            rowClassName={(row) => row.useYn === "N" ? "!text-red-500 dark:!text-red-400" : ""}
+            toolbarLeft={
+              <div className="flex gap-2 items-center flex-1 min-w-0">
+                <div className="flex-1 min-w-0">
+                  <Input placeholder={t("master.partner.searchPlaceholder")} value={searchText}
+                    onChange={(e) => setSearchText(e.target.value)} leftIcon={<Search className="w-4 h-4" />} fullWidth />
+                </div>
+                <div className="w-40 flex-shrink-0">
+                  <ComCodeSelect groupCode="PARTNER_TYPE" value={typeFilter} onChange={setTypeFilter}
+                    labelPrefix={t("master.partner.partnerType")} fullWidth />
+                </div>
+                <div className="w-36 flex-shrink-0">
+                  <UseYnSelect value={useYnFilter} onChange={setUseYnFilter} fullWidth />
+                </div>
+              </div>
+            }
+          />
+        </CardContent></Card>
+      </div>
+
+      {isPanelOpen && (
+        <PartnerFormPanel
+          key={`${panelMode}-${panelKey}`}
+          mode={panelMode}
+          editingPartner={editingPartner}
+          onClose={handlePanelClose}
+          onSave={handlePanelSave}
+          animate={panelAnimateRef.current}
+        />
+      )}
+
+      <ConfirmModal
+        isOpen={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleDeleteConfirm}
+        variant="danger"
+        message={`'${deleteTarget?.partnerName || ""}'을(를) 삭제하시겠습니까?`}
+      />
+    </div>
+  );
+}
+
+export default PartnerPage;

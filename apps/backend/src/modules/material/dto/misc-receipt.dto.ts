@@ -1,0 +1,59 @@
+/**
+ * @file src/modules/material/dto/misc-receipt.dto.ts
+ * @description 기타입고 관련 DTO
+ */
+
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsString, IsOptional, IsInt, Min, Max, MaxLength, IsDateString } from 'class-validator';
+import { Type } from 'class-transformer';
+import { PaginationQueryDto } from '../../../common/dto/base-query.dto';
+
+export class CreateMiscReceiptDto {
+  @ApiProperty({ description: '입고 창고 ID' })
+  @IsString()
+  warehouseId: string;
+
+  @ApiProperty({ description: '품목 코드' })
+  @IsString()
+  itemCode: string;
+
+  @ApiPropertyOptional({ description: '자재 UID' })
+  @IsOptional()
+  @IsString()
+  matUid?: string;
+
+  @ApiProperty({ description: '입고 수량' })
+  @IsInt()
+  @Min(1)
+  qty: number;
+
+  @ApiPropertyOptional({ description: '비고' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  remark?: string;
+
+  @ApiPropertyOptional({ description: '작업자 ID' })
+  @IsOptional()
+  @IsString()
+  workerId?: string;
+}
+
+export class MiscReceiptQueryDto extends PaginationQueryDto {
+
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  search?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsDateString()
+  fromDate?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsDateString()
+  toDate?: string;
+}
